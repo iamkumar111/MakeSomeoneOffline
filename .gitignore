@@ -1,0 +1,32 @@
+# Binaries
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Node / Frontend
+web/node_modules/
+web/dist/
+
+# Test artifacts
+*.out
+*.test
+
+# Database and runtime state
+netcut.json
+netcut.json.bak
+netcut.json.tmp
+*.log
+
+# Sensitive credentials & environment
+.env
+.env.*
+.agents/
+*.pem
+*.key
+
+# Environment & IDE
+.vscode/
+.idea/
+.DS_Store
