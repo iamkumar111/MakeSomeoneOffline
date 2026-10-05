@@ -1,0 +1,17 @@
+services:
+  control-plane:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.control-plane
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    command: ["-port", "8080", "-db", "/app/netcut.json"]
+    environment:
+      - PORT=8080
+      - SITE_ID=default
+    volumes:
+      # JSON snapshot persistence (atomic save + .bak fallback).
+      - ./netcut.json:/app/netcut.json
+    restart: unless-stopped
