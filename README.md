@@ -7,6 +7,32 @@
 
 ---
 
+> [!IMPORTANT]
+> **Linux Only**: Open-NetCut is designed and built exclusively for the **Linux** operating system. It relies directly on Linux kernel subsystems (`AF_PACKET` raw sockets, `nftables` netfilter rules, `tc` traffic shaping, and `/sys/class/net` interface introspection). It does **not** run natively on Windows or macOS.
+
+---
+
+## 🐧 Linux Only — Supported Distributions & Flavors
+
+Open-NetCut runs on any modern Linux system (Kernel 5.4+) with `root` or `CAP_NET_ADMIN` + `CAP_NET_RAW` privileges:
+
+| Linux Flavor / Distribution | Verified Versions | Prerequisite Installation Command |
+|---|---|---|
+| **Ubuntu** | 20.04, 22.04, 24.04 LTS | `sudo apt update && sudo apt install -y nftables iproute2` |
+| **Debian** | 11 (Bullseye), 12 (Bookworm) | `sudo apt update && sudo apt install -y nftables iproute2` |
+| **Kali Linux** | 2023.x, 2024.x | `sudo apt update && sudo apt install -y nftables iproute2` |
+| **Arch Linux / Manjaro** | Rolling (Latest) | `sudo pacman -Sy --noconfirm nftables iproute2` |
+| **Fedora** | 38, 39, 40+ | `sudo dnf install -y nftables iproute` |
+| **RHEL / Rocky / AlmaLinux** | 8.x, 9.x | `sudo dnf install -y nftables iproute` |
+| **Alpine Linux** | 3.18, 3.19, 3.20+ | `apk add --no-cache nftables iproute2` |
+| **OpenWrt** | 21.02, 22.03, 23.05+ | `opkg update && opkg install nftables ip-full` |
+| **Raspberry Pi OS** | Bullseye, Bookworm (32/64-bit) | `sudo apt update && sudo apt install -y nftables iproute2` |
+
+> [!NOTE]
+> **Using Windows or macOS**: Since Open-NetCut directly manipulates Linux raw sockets and netfilter tables, Windows and macOS are not natively supported. To use Open-NetCut from a Windows or Mac host, run a Linux VM (VirtualBox, VMware, or KVM) configured with a **Bridged Network Adapter** connected directly to your physical Ethernet/Wi-Fi interface. (Default WSL2 or Docker Desktop NAT bridges isolate L2 Ethernet frames).
+
+---
+
 ## Which quarantine method works for you
 
 | Your setup | Method (adapter) | Wired + WiFi? |

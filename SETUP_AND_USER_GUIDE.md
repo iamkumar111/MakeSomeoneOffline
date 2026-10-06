@@ -6,15 +6,43 @@ This guide provides end-to-end instructions for deploying, configuring, and oper
 
 ## 1. System Requirements & Prerequisites
 
-Open-NetCut requires a Linux host (bare-metal, VM, or container with appropriate capabilities):
+> [!IMPORTANT]
+> **Strictly Linux Only**: Open-NetCut is built exclusively for the **Linux kernel** and cannot run natively on Windows or macOS. It directly relies on low-level Linux subsystems:
+> - **Raw Packet Sockets (`AF_PACKET`, `SOCK_RAW`)** for wire-level ARP/NDP discovery and Layer 2 frames.
+> - **Kernel Netfilter (`nftables`)** for multi-chain drop rules and byte/packet accounting.
+> - **Traffic Control (`tc` / `iproute2`)** HTB token buckets for per-device bandwidth rate-limiting.
+> - **Sysfs & Netlink (`/sys/class/net`, `/proc/net/arp`)** for physical interface filtering and neighbor tables.
 
-| Requirement | Details |
+### 1.1 Supported Linux Flavors & Distributions
+
+Open-NetCut is tested and supported across all major Linux distributions (Kernel 5.4 or higher):
+
+| Linux Flavor / Family | Supported Distributions & Versions | Default Package Manager | Prerequisite Install Command |
+|---|---|---|---|
+| **Debian / Ubuntu Family** | Ubuntu 20.04, 22.04, 24.04 LTS<br>Debian 11 (Bullseye), 12 (Bookworm)<br>Kali Linux 2023.x, 2024.x<br>Linux Mint 21+, Pop!_OS 22.04+ | `apt` | `sudo apt update && sudo apt install -y nftables iproute2` |
+| **Arch Family** | Arch Linux (Rolling)<br>Manjaro (Rolling)<br>EndeavourOS | `pacman` | `sudo pacman -Sy --noconfirm nftables iproute2` |
+| **Red Hat / Fedora Family** | Fedora 38, 39, 40+<br>RHEL 8.x, 9.x<br>Rocky Linux 8/9, AlmaLinux 8/9<br>CentOS Stream 9 | `dnf` | `sudo dnf install -y nftables iproute` |
+| **Alpine Linux** | Alpine 3.18, 3.19, 3.20+ (Ideal for lightweight Docker/containers) | `apk` | `apk add --no-cache nftables iproute2` |
+| **OpenWrt / Embedded** | OpenWrt 21.02, 22.03, 23.05+ (MIPS, ARM, x86_64 routers) | `opkg` | `opkg update && opkg install nftables ip-full` |
+| **Raspberry Pi OS** | Bullseye, Bookworm (Raspberry Pi 3, 4, 5, Compute Module 4) | `apt` | `sudo apt update && sudo apt install -y nftables iproute2` |
+| **openSUSE Family** | openSUSE Leap 15.5+, openSUSE Tumbleweed | `zypper` | `sudo zypper install -y nftables iproute2` |
+
+### 1.2 Running from Windows or macOS
+
+If your daily workstation runs Windows or macOS, you **cannot** run Open-NetCut directly in PowerShell or Terminal.
+- **Windows Subsystem for Linux (WSL2)**: WSL2 operates behind a virtual Hyper-V NAT switch. It cannot bind raw Layer 2 packets to your physical home Wi-Fi/Ethernet interface.
+- **Docker Desktop (Mac/Windows)**: Uses a lightweight VM with internal virtual NAT bridges, hiding the host's actual LAN broadcast domain.
+- **Working Solution**: Run Open-NetCut inside a Linux Virtual Machine (such as **VirtualBox**, **VMware Workstation/Fusion**, or **UTM**) with the network adapter set to **Bridged Adapter** attached directly to your physical Ethernet or Wi-Fi card. This grants the Linux guest direct Layer 2 access to your physical LAN.
+
+### 1.3 Hardware & Kernel Capabilities
+
+| Requirement | Specification |
 |---|---|
-| **Operating System** | Linux (Ubuntu 22.04+, Debian 12+, Alpine 3.20+, OpenWrt, Arch, Fedora) |
-| **Go Toolchain** | Go 1.25+ (to compile from source) |
+| **CPU Architecture** | `amd64` (x86_64), `arm64` (aarch64), `armv7l`, or `mips`/`mipsel` |
+| **Memory** | 64 MB minimum (embedded), 256 MB recommended |
+| **Privileges** | `root` or Linux capabilities: `CAP_NET_ADMIN` and `CAP_NET_RAW` |
+| **Go Toolchain** | Go 1.22+ (to compile from source) |
 | **Node.js** | Node.js 18+ and npm (to build the web dashboard) |
-| **Kernel Capabilities** | `CAP_NET_ADMIN` and `CAP_NET_RAW` (or `root`) |
-| **Kernel Modules / Tools** | `nftables` (for firewall drops & accounting), `iproute2` / `tc` (for rate limiting) |
 
 ---
 
