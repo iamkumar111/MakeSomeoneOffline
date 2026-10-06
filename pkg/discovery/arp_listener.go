@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -63,7 +64,9 @@ func (s *NetworkScanner) Stop() {
 	close(s.stopCh)
 }
 
-// ScanOnce performs one pass of active subnet sweep, local interface ingestion, /proc/net/arp, and `ip neigh`.
+// ScanOnce performs one pass of active subnet sweep, local interface ingestion,
+// kernel ARP/neighbor tables (`/proc/net/arp` and `ip neigh` on Linux,
+// `arp -a` on Windows).
 func (s *NetworkScanner) ScanOnce(ctx context.Context) {
 	// 1. Ingest local machine physical interfaces so the host itself is always tracked with full MAC & hostname
 	s.ingestLocalInterfaces()
@@ -71,11 +74,14 @@ func (s *NetworkScanner) ScanOnce(ctx context.Context) {
 	// 2. Trigger concurrent subnet sweeps on physical LAN subnets to refresh the kernel ARP/neighbor cache
 	s.probeSubnet(ctx)
 
-	// 3. Read /proc/net/arp populated by kernel ARP replies
-	s.readProcNetARP()
-
-	// 4. Read `ip neigh`
-	s.readIPNeigh(ctx)
+	// 3. Read the OS neighbor table populated by ARP replies.
+	if runtime.GOOS == "windows" {
+		s.readWindowsArp(ctx)
+	} else {
+		s.readProcNetARP()
+		// 4. Read `ip neigh`
+		s.readIPNeigh(ctx)
+	}
 }
 
 func isPhysicalInterface(iface net.Interface) bool {
@@ -97,13 +103,22 @@ func isPhysicalInterfaceName(name string) bool {
 	virtualPrefixes := []string{
 		"docker", "br-", "veth", "virbr", "vmnet", "vboxnet",
 		"tun", "tap", "dummy", "wg", "tailscale", "zt", "cni", "flannel", "lo",
+		"vethernet", "virtual", "vpn", "tap-windows", "hyper-v", "vmware",
+		"virtualbox", "wireguard", "zerotier", "isatap", "teredo", "6to4",
+		"loopback", "pseudo",
 	}
 	for _, p := range virtualPrefixes {
 		if strings.HasPrefix(name, p) {
 			return false
 		}
 	}
+	if strings.Contains(name, "*") {
+		return false
+	}
 
+	if runtime.GOOS == "windows" {
+		return true
+	}
 	if _, err := os.Stat("/sys/class/net/" + name + "/device"); err == nil {
 		return true
 	}
@@ -203,6 +218,35 @@ func (s *NetworkScanner) readProcNetARP() {
 				})
 			}
 		}
+	}
+}
+
+func (s *NetworkScanner) readWindowsArp(_ context.Context) {
+	out, err := exec.Command("arp", "-a").Output()
+	if err != nil {
+		return
+	}
+
+	now := time.Now().UTC()
+	for _, n := range ParseArpTable(string(out)) {
+		if n.MACAddress == "" || n.MACAddress == "00:00:00:00:00:00" {
+			continue
+		}
+		attrs := map[string]interface{}{
+			"arp_type":  n.Type,
+			"is_online": true,
+		}
+		if ptr := resolveHostname(n.IPAddress); ptr != "" {
+			attrs["ptr_hostname"] = ptr
+		}
+		s.fusionEngine.IngestObservation(models.Observation{
+			Timestamp:  now,
+			Source:     "arp_windows",
+			MAC:        n.MACAddress,
+			IP:         n.IPAddress,
+			Interface:  n.Interface,
+			Attributes: attrs,
+		})
 	}
 }
 
@@ -430,6 +474,9 @@ func getBroadcastIP(n *net.IPNet) net.IP {
 
 // GetDefaultGateway attempts to find the default gateway IP and MAC.
 func GetDefaultGateway(ctx context.Context) (ip string, mac string, err error) {
+	if runtime.GOOS == "windows" {
+		return getWindowsDefaultGateway(ctx)
+	}
 	// Look up default route via `ip route show default`
 	cmd := exec.CommandContext(ctx, "ip", "route", "show", "default")
 	out, err := cmd.Output()
@@ -462,4 +509,30 @@ func GetDefaultGateway(ctx context.Context) (ip string, mac string, err error) {
 	}
 
 	return ip, mac, nil
+}
+
+func getWindowsDefaultGateway(ctx context.Context) (string, string, error) {
+	out, err := exec.CommandContext(ctx, "route", "print", "-4").Output()
+	if err != nil {
+		return "", "", fmt.Errorf("default gateway not found")
+	}
+	gateway := ""
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 3 && fields[0] == "0.0.0.0" && fields[1] == "0.0.0.0" {
+			gateway = fields[2]
+			break
+		}
+	}
+	if gateway == "" {
+		return "", "", fmt.Errorf("default gateway not found")
+	}
+	if out, err := exec.CommandContext(ctx, "arp", "-a").Output(); err == nil {
+		for _, n := range ParseArpTable(string(out)) {
+			if n.IPAddress == gateway && n.MACAddress != "" {
+				return gateway, n.MACAddress, nil
+			}
+		}
+	}
+	return gateway, "", nil
 }

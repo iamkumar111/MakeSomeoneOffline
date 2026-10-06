@@ -136,6 +136,7 @@ func main() {
 	registry := adapters.NewAdapterRegistry()
 	mockAdapter := adapters.NewMemoryMockAdapter("mock_simulator")
 	registry.Register(mockAdapter)
+	adapters.RegisterPlatformAdapters(registry)
 
 	nftAdapter := adapters.NewLinuxNFTablesAdapter("open_netcut", "quarantine")
 	if nftAdapter.IsAvailable(ctx) {

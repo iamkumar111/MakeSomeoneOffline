@@ -14,6 +14,11 @@ build: build-ui
 	@echo "Building netcut-cli..."
 	go build -o bin/netcut-cli ./cmd/netcut-cli
 
+build-win:
+	@echo "Cross-compiling Windows binaries..."
+	GOOS=windows GOARCH=amd64 go build -o bin/control-plane.exe ./cmd/control-plane
+	GOOS=windows GOARCH=amd64 go build -o bin/win-tool.exe ./cmd/win-tool
+
 test:
 	@echo "Running tests..."
 	go test -v ./pkg/... ./test/e2e/...
