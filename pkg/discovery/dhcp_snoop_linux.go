@@ -4,7 +4,6 @@ package discovery
 
 import (
 	"context"
-	"net"
 	"sync"
 	"syscall"
 	"time"
