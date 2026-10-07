@@ -692,16 +692,41 @@ export default function App() {
     }
   };
 
+  // Release is async server-side (202 + background lift): a single refresh
+  // right after Unblock shows stale rows. Poll until the cuts are actually
+  // gone (or timeout) and report honestly instead of pretending.
+  const waitForRelease = async (deviceId: string | null, timeoutMs = 30000) => {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const enfs: any[] = await fetch('/api/v1/enforcements').then(r => r.json()).catch(() => []);
+      const live = enfs.filter(e => !e.dry_run && e.actual_state === 'applied' && (!deviceId || e.device_id === deviceId));
+      fetchPolicies(); refreshData(); fetchFreezeStatus();
+      if (live.length === 0) return { ok: true as const, remaining: [] as any[] };
+      if (Date.now() > deadline) return { ok: false as const, remaining: live };
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  };
+
   const executeLiftQuarantine = async (device: Device) => {
     try {
       const res = await fetch(`/api/v1/devices/${device.id}/quarantine`, {
         method: 'DELETE'
       });
-      if (res.ok) {
-        setActionMessage(`Quarantine lifted for ${device.display_name}`);
-        setTimeout(() => setActionMessage(null), 4000);
-        refreshData();
+      if (!res.ok) {
+        notifyError(`Lift failed: ${res.statusText}`);
+        return;
       }
+      setActionMessage(`Releasing ${device.display_name}…`);
+      const rel = await waitForRelease(device.id);
+      if (rel.ok) {
+        setActionMessage(`Quarantine lifted for ${device.display_name}`);
+      } else {
+        const err = rel.remaining[0]?.error_message || 'kernel rule stuck';
+        notifyError(`Still blocked (${rel.remaining.length}): ${err} — see Quarantine tab`);
+        setActionMessage(`Release incomplete for ${device.display_name}`);
+      }
+      setTimeout(() => setActionMessage(null), 6000);
+      refreshData();
     } catch (err) {
       notifyError(`Request failed: ${err}`);
     }
@@ -946,6 +971,10 @@ export default function App() {
                 <div className="stat-val">{stats?.quarantined_devices ?? 0}</div>
                 <div className="stat-label">Quarantined / Cut</div>
                 {(() => {
+                  const live = enforcements.filter((e: any) => !e.dry_run && e.actual_state === 'applied').length;
+                  return <div className="font-mono" style={{ fontSize: '0.75rem', color: live > 0 ? '#f87171' : '#9ca3af' }}>{live} live cut{live === 1 ? '' : 's'}</div>;
+                })()}
+                {(() => {
                   let minMs = Infinity;
                   for (const e of enforcements) {
                     if (e.action !== 'quarantine' || e.actual_state !== 'applied' || !e.expires_at) continue;
@@ -1140,7 +1169,22 @@ export default function App() {
                     title="Lift every active quarantine (including manual ones)"
                     confirmLabel="Confirm unblock all?"
                     onConfirm={async () => {
-                      await fetch('/api/v1/freeze', { method: 'DELETE' });
+                      const del = await fetch('/api/v1/freeze', { method: 'DELETE' }).then(r => r.json()).catch(() => ({}));
+                      if (del?.status === 'already_released') {
+                        setActionMessage('Everything is already released.');
+                        setTimeout(() => setActionMessage(null), 4000);
+                        fetchPolicies(); refreshData(); fetchFreezeStatus();
+                        return;
+                      }
+                      setActionMessage('Releasing all cuts…');
+                      const rel = await waitForRelease(null, 45000);
+                      if (rel.ok) {
+                        setActionMessage('All internet released.');
+                      } else {
+                        notifyError(`${rel.remaining.length} cut(s) stuck — open the Quarantine tab for errors`);
+                        setActionMessage('Release incomplete — check Quarantine tab');
+                      }
+                      setTimeout(() => setActionMessage(null), 6000);
                       fetchPolicies(); refreshData(); fetchFreezeStatus();
                     }}
                   >
@@ -1713,6 +1757,15 @@ export default function App() {
                   confirmLabel="Confirm unfreeze?"
                   onConfirm={async () => {
                     await fetch('/api/v1/freeze', { method: 'DELETE' });
+                    setActionMessage('Releasing all cuts…');
+                    const rel = await waitForRelease(null, 45000);
+                    if (rel.ok) {
+                      setActionMessage('All internet released.');
+                    } else {
+                      notifyError(`${rel.remaining.length} cut(s) stuck — see errors below`);
+                      setActionMessage('Release incomplete — see errors below');
+                    }
+                    setTimeout(() => setActionMessage(null), 6000);
                     fetchPolicies(); refreshData();
                   }}
                 >Unfreeze all</ConfirmButton>

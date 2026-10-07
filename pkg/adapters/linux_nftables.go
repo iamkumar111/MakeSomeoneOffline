@@ -168,9 +168,11 @@ func (a *LinuxNFTablesAdapter) RemoveQuarantine(ctx context.Context, e *models.E
 
 	// Surgical removal: delete only rules added for this enforcement.
 	// Never flush the whole chain (would drop other devices' quarantines).
-	// `nft delete rule <spec>` removes just ONE matching instance, so loop
-	// until the spec is gone (duplicates from older versions pile up and
-	// would otherwise keep blocking after release).
+	// Two passes: spec-delete first (works on older nft), then an
+	// unconditional handle-delete sweep. The sweep is required, not a
+	// fallback: current nft rejects spec-delete for ether matches
+	// ("syntax error, unexpected ether, expecting handle"), so MAC rules
+	// would otherwise survive every release.
 	if specs, ok := a.rules[e.ID]; ok && len(specs) > 0 {
 		for _, spec := range specs {
 			a.deleteRuleAllLocked(ctx, spec)
@@ -182,6 +184,7 @@ func (a *LinuxNFTablesAdapter) RemoveQuarantine(ctx context.Context, e *models.E
 			a.deleteRuleAllLocked(ctx, spec)
 		}
 	}
+	a.deleteRuleHandlesLocked(ctx, e)
 
 	// Verify: no rule may still reference this target. A leftover drop is
 	// exactly the "release doesn't work until reconnect" symptom.
@@ -249,7 +252,7 @@ func (a *LinuxNFTablesAdapter) ruleExistsLocked(ctx context.Context, spec string
 
 // deleteRuleAllLocked deletes every instance of a spec (bounded loop).
 func (a *LinuxNFTablesAdapter) deleteRuleAllLocked(ctx context.Context, spec string) {
-	for i := 0; i < 16; i++ {
+	for i := 0; i < 32; i++ {
 		cmd := exec.CommandContext(ctx, "sh", "-c", "nft delete rule "+spec)
 		if err := cmd.Run(); err != nil {
 			return // no more instances (or chain gone)
@@ -258,6 +261,55 @@ func (a *LinuxNFTablesAdapter) deleteRuleAllLocked(ctx context.Context, spec str
 			return
 		}
 	}
+}
+
+// deleteRuleHandlesLocked deletes leftover drop rules referencing the target
+// by kernel handle. Handles are exact: this catches anything spec-delete
+// missed. Scoped to drop rules mentioning the target IP/MAC only —
+// accounting (accept) rules are never touched.
+func (a *LinuxNFTablesAdapter) deleteRuleHandlesLocked(ctx context.Context, e *models.Enforcement) {
+	for _, chain := range []string{"forward", "input"} {
+		for _, h := range a.matchingHandlesLocked(ctx, chain, e) {
+			cmd := exec.CommandContext(ctx, "sh", "-c",
+				fmt.Sprintf("nft delete rule inet %s %s handle %s", a.tableName, chain, h))
+			_ = cmd.Run()
+		}
+	}
+}
+
+// matchingHandlesLocked returns kernel handles of drop rules referencing the target.
+func (a *LinuxNFTablesAdapter) matchingHandlesLocked(ctx context.Context, chain string, e *models.Enforcement) []string {
+	out, err := exec.CommandContext(ctx, "sh", "-c",
+		fmt.Sprintf("nft --handle list chain inet %s %s", a.tableName, chain)).CombinedOutput()
+	if err != nil {
+		return nil
+	}
+	var handles []string
+	for _, line := range strings.Split(string(out), "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" || strings.HasPrefix(t, "table ") || strings.HasPrefix(t, "chain ") || t == "}" {
+			continue
+		}
+		if !strings.Contains(t, "drop") {
+			continue
+		}
+		matched := false
+		if e.TargetIP != "" && strings.Contains(t, e.TargetIP) {
+			matched = true
+		}
+		if e.TargetMAC != "" && strings.Contains(strings.ToLower(t), strings.ToLower(e.TargetMAC)) {
+			matched = true
+		}
+		if !matched {
+			continue
+		}
+		if i := strings.LastIndex(t, "# handle"); i >= 0 {
+			if h := strings.TrimSpace(t[i+len("# handle"):]); h != "" {
+				handles = append(handles, h)
+			}
+		}
+	}
+	return handles
 }
 
 // remnantRuleLocked returns a leftover rule line referencing the target, if any.

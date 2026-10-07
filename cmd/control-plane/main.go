@@ -318,6 +318,28 @@ func main() {
 					})
 				}
 			}
+			// Trust labels must follow enforcement reality on EVERY removal
+			// path (TTL expiry, schedule end, manual lift, freeze lift).
+			// Previously only freeze-lift reset trust, so TTL-expired cuts
+			// left devices showing "quarantined" forever with 0 enforcements.
+			if evt.Type == events.EventEnforcementRemoved {
+				if enf, ok := evt.Data.(*models.Enforcement); ok && enf != nil {
+					stillCovered := false
+					for _, other := range policyEngine.ListEnforcements() {
+						if other.DryRun {
+							continue
+						}
+						if other.DeviceID == enf.DeviceID && other.ActualState == models.StateApplied &&
+							(other.Action == models.ActionQuarantine || other.Action == models.ActionRateLimit) {
+							stillCovered = true
+							break
+						}
+					}
+					if !stillCovered {
+						_ = fusionEngine.SetTrustState(enf.DeviceID, models.TrustStateUnknown)
+					}
+				}
+			}
 		}
 	}()
 

@@ -590,6 +590,13 @@ func (fe *IdentityFusionEngine) SnapshotDevices() []*models.Device {
 			continue
 		}
 		cp := *d
+		// "quarantined" is enforcement-derived and enforcements are never
+		// persisted — saving it would resurrect the label on every restart
+		// with zero live cuts ("Unblock All but panel still shows
+		// quarantined"). Manual trusted/restricted decisions persist.
+		if cp.TrustState == models.TrustStateQuarantined {
+			cp.TrustState = models.TrustStateUnknown
+		}
 		cp.Metadata = make(map[string]interface{}, len(d.Metadata))
 		for k, v := range d.Metadata {
 			cp.Metadata[k] = v
@@ -628,7 +635,10 @@ func (fe *IdentityFusionEngine) RestoreDevices(devs []*models.Device) {
 					live.Metadata["hostname_source"] = "manual"
 				}
 			}
-			if sd.TrustState != models.TrustStateUnknown {
+			// Never resurrect "quarantined": enforcements die with the
+			// process, so a restored quarantine label can never match a
+			// live cut (downgrade to unknown; old snapshots may contain it).
+			if sd.TrustState != models.TrustStateUnknown && sd.TrustState != models.TrustStateQuarantined {
 				live.TrustState = sd.TrustState
 			}
 			fe.refineDisplayName(live)
@@ -639,6 +649,9 @@ func (fe *IdentityFusionEngine) RestoreDevices(devs []*models.Device) {
 			continue
 		}
 		cp := *sd
+		if cp.TrustState == models.TrustStateQuarantined {
+			cp.TrustState = models.TrustStateUnknown
+		}
 		cp.Metadata = make(map[string]interface{}, len(sd.Metadata))
 		for k, v := range sd.Metadata {
 			cp.Metadata[k] = v
