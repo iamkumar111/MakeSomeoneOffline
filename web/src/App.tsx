@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { Device, Alert, Stats, DeviceTrafficStats } from './types';
 import { liveQuarantines, quarantineDevices } from './quarantine';
+import { downloadDiagnostics } from './diagnostics';
 
 // Two-click inline confirm: first click arms (red, 5s), second executes.
 // Replaces blocking native confirm() dialogs.
@@ -82,6 +83,11 @@ export default function App() {
     setTimeout(() => { setActionMessage(null); setActionUndo(null); }, ms);
   };
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  useEffect(() => {
+    const onDiagnosticError = (event: Event) => setErrorMessage((event as CustomEvent<string>).detail);
+    window.addEventListener('netcut-diagnostic-error', onDiagnosticError);
+    return () => window.removeEventListener('netcut-diagnostic-error', onDiagnosticError);
+  }, []);
   const [loadingMap, setLoadingMap] = useState<Record<string, boolean>>({});
   const isLoading = Object.values(loadingMap).some(Boolean);
 
@@ -909,6 +915,7 @@ export default function App() {
       {/* Main Content */}
       <main className="main-content">
         <header className="top-bar">
+          <button className="btn btn-secondary btn-sm" onClick={downloadDiagnostics}>Download troubleshooting logs</button>
           <h2 style={{ fontSize: '1.25rem', fontWeight: 600 }}>
             {activeTab === 'dashboard' && 'Network Operations Dashboard'}
             {activeTab === 'devices' && 'Discovered Network Inventory'}

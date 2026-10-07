@@ -1,5 +1,8 @@
 # Windows: Quick Setup and Test
 
+For historical errors, unresponsive buttons and retained logs, see
+[Troubleshooting for all platforms](TROUBLESHOOTING.md).
+
 Use Windows 11 x64 and a test device on a network you own or administer.
 
 ## 1. Download and install

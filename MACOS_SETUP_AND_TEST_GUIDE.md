@@ -1,5 +1,8 @@
 # macOS: Initial Version
 
+For retained logs and unresponsive buttons, see
+[Troubleshooting for all platforms](TROUBLESHOOTING.md).
+
 Available: dashboard, LAN IPv4 discovery, native gateway detection, and dry-run
 previews. Live quarantine, release of real cuts, packet monitoring, and bandwidth
 shaping are not implemented for macOS. Live enforcement requests return an error.

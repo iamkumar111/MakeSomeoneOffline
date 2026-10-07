@@ -14,6 +14,7 @@ import (
 
 	"github.com/open-netcut/open-netcut/pkg/adapters"
 	"github.com/open-netcut/open-netcut/pkg/detection"
+	"github.com/open-netcut/open-netcut/pkg/diagnostics"
 	"github.com/open-netcut/open-netcut/pkg/discovery"
 	"github.com/open-netcut/open-netcut/pkg/events"
 	"github.com/open-netcut/open-netcut/pkg/models"
@@ -99,7 +100,17 @@ func main() {
 	siteID := flag.String("site", "default", "Site identifier")
 	enableScanner := flag.Bool("scanner", true, "Enable local ARP/procfs network scanner")
 	dbPath := flag.String("db", "", "Path to persistent database storage (optional)")
+	logDir := flag.String("log-dir", "logs", "Troubleshooting log directory (empty disables file logging); retains current file and 3 backups")
 	flag.Parse()
+	log.SetFlags(log.Ldate | log.Ltime | log.LUTC | log.Lmicroseconds)
+	if *logDir != "" {
+		fileLog, err := diagnostics.OpenLog(*logDir, 5<<20, 3)
+		if err != nil {
+			log.Fatalf("Cannot open troubleshooting log directory: %v; choose a writable -log-dir", err)
+		}
+		defer fileLog.Close()
+		log.SetOutput(diagnostics.ConsoleAndFile{Console: os.Stderr, File: fileLog})
+	}
 	if ip := net.ParseIP(*listenHost); (*listenHost != "localhost" && (ip == nil || !ip.IsLoopback())) && os.Getenv("NETCUT_API_TOKEN") == "" {
 		log.Fatal("Non-loopback listening requires NETCUT_API_TOKEN; use the default 127.0.0.1 for local access")
 	}

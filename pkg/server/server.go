@@ -99,7 +99,7 @@ func NewServer(
 
 // Handler returns the HTTP handler for the server.
 func (s *Server) Handler() http.Handler {
-	return s.secureHandler(s.router)
+	return requestLogging(s.secureHandler(s.router))
 }
 
 func (s *Server) routes() {
@@ -166,6 +166,7 @@ func (s *Server) enableCORS(next http.HandlerFunc) http.HandlerFunc {
 		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-User, X-Actor")
+		w.Header().Set("Access-Control-Expose-Headers", "X-Request-ID")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusOK)
 			return

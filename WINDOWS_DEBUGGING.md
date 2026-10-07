@@ -1,5 +1,8 @@
 # Open-NetCut on Windows: setup, prerequisites, debugging, and verification
 
+[Shared troubleshooting](TROUBLESHOOTING.md) covers old errors, retained logs,
+request IDs and every dashboard action, including unresponsive buttons.
+
 Native Windows builds support dashboard/discovery, dry-runs, and experimental
 `windows_sidehost` quarantine through Npcap. Linux gateway enforcement remains
 recommended for reliable blocking and traffic shaping. Use live tests only on

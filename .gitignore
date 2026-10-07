@@ -18,6 +18,11 @@ netcut.json
 netcut.json.bak
 netcut.json.tmp
 *.log
+*.log.*
+logs/
+windows-diagnostics*.json
+open-netcut-browser-*.json
+platform-diagnostics.txt
 
 # Sensitive credentials & environment
 .env

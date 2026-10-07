@@ -1,5 +1,9 @@
 # Open-NetCut
 
+**Troubleshooting:** [Linux, Windows and macOS logs, historical errors and
+unresponsive buttons](TROUBLESHOOTING.md). Server logs are retained in `logs/`;
+the dashboard can download browser troubleshooting history.
+
 > **Open-source network observability & policy-control platform.**
 > Device inventory with real names, LAN threat detection, live per-device
 > bandwidth, scheduled + policy-driven quarantine, and camera discovery —
