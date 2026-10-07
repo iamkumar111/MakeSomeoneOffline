@@ -692,7 +692,9 @@ export default function App() {
         const text = await res.text();
         notifyError(`Error: ${text || res.statusText}`);
       } else {
-        setActionMessage(`Quarantine applied to ${selectedDevice.display_name} via ${selectedAdapter}`);
+        const result = await res.json();
+        if (result.enforcement?.error_message) notifyError(`${result.enforcement.error_message} Check Enforcements and Restore.`);
+        else setActionMessage(`${dryRun ? 'Dry-run preview created' : 'Quarantine applied'} to ${selectedDevice.display_name} via ${selectedAdapter}`);
         setTimeout(() => setActionMessage(null), 4000);
       }
       setShowQuarantineModal(false);
@@ -1955,10 +1957,10 @@ export default function App() {
                   value={quarantineTTL} 
                   onChange={(e) => setQuarantineTTL(Number(e.target.value))}
                 >
+                  <option value={60}>1 minute (test)</option>
                   <option value={900}>15 minutes (Safe default)</option>
                   <option value={3600}>1 hour</option>
                   <option value={86400}>24 hours</option>
-                  <option value={0}>Indefinite (Manual lift required)</option>
                 </select>
               </div>
 

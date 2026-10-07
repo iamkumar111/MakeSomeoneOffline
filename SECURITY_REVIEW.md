@@ -44,11 +44,14 @@ production build. Windows Go tests, frontend tests, TypeScript checking, and the
 dashboard build pass. Linux and both macOS architectures can be cross-compiled
 on Windows; native runtime and LAN tests still need execution on those systems.
 
-The initial macOS version uses native ARP/route commands for IPv4 discovery and
-gateway detection. Live quarantine and rate limiting fail explicitly; dry-run
-previews remain available and never count as live cuts.
+The macOS version adds experimental native BPF ARP/NDP quarantine. It requires
+explicit selection/opt-in, root, validated routes/current target MAC and both
+forwarding settings off. BPF header preservation is configured and read back.
+Restore uses saved mappings after the worker stops. Failed partial-apply cleanup
+keeps a visible Restore/TTL owner. Dry runs never inject or stop live cuts;
+live simulator fallback and native rate limiting are rejected.
 
-Live Windows/Linux ARP/NDP behavior remains to be tested on a controlled LAN:
+Live Windows/Linux/macOS ARP/NDP behavior remains to be tested on a controlled LAN:
 apply a short cut, verify IPv4 and IPv6 on the target, restore, then check TTL.
 An applied record is not proof of isolation. A forced process termination cannot
 guarantee healing. Router/switch defenses can prevent side-host enforcement;

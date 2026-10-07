@@ -396,6 +396,15 @@ func main() {
 	defer shutdownCancel()
 	_ = httpServer.Shutdown(shutdownCtx)
 	policyEngine.Stop()
+	for _, adapter := range registry.List() {
+		if cleanup, ok := adapter.(interface{ Shutdown(context.Context) error }); ok {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			if err := cleanup.Shutdown(cleanupCtx); err != nil {
+				log.Printf("Adapter shutdown restoration incomplete: %v", err)
+			}
+			cleanupCancel()
+		}
+	}
 	fusionEngine.Stop()
 	log.Printf("Shutdown complete.")
 }

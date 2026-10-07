@@ -38,19 +38,20 @@ const (
 // AdapterInfo is user-facing guidance: what to pick and why.
 // Effectiveness is 1-5 for a Linux-gateway deployment (5 = use this).
 type AdapterInfo struct {
-	Name            string   `json:"name"`
-	Label           string   `json:"label"`
-	Kind            AdapterKind `json:"kind"`
-	Effectiveness   int      `json:"effectiveness_1_5"`
-	Capabilities    []string `json:"capabilities"`
-	RecommendedWhen string   `json:"recommended_when"`
-	Requires        string   `json:"requires"`
-	Description     string   `json:"description"`
-	Warning         string   `json:"warning,omitempty"`
-	LabOnly         bool     `json:"lab_only,omitempty"`
-	TestOnly        bool     `json:"test_only,omitempty"`
-	SupportsQuarantine bool `json:"supports_quarantine"`
-	SupportsShaping    bool `json:"supports_shaping"`
+	Name               string      `json:"name"`
+	Label              string      `json:"label"`
+	Kind               AdapterKind `json:"kind"`
+	Effectiveness      int         `json:"effectiveness_1_5"`
+	Capabilities       []string    `json:"capabilities"`
+	RecommendedWhen    string      `json:"recommended_when"`
+	Requires           string      `json:"requires"`
+	Description        string      `json:"description"`
+	Warning            string      `json:"warning,omitempty"`
+	LabOnly            bool        `json:"lab_only,omitempty"`
+	TestOnly           bool        `json:"test_only,omitempty"`
+	ExplicitSelection  bool        `json:"requires_explicit_selection,omitempty"`
+	SupportsQuarantine bool        `json:"supports_quarantine"`
+	SupportsShaping    bool        `json:"supports_shaping"`
 }
 
 // MemoryMockAdapter provides an in-memory enforcement implementation for testing and dry-run modes.
@@ -82,12 +83,12 @@ func (m *MemoryMockAdapter) Describe() AdapterInfo {
 	return AdapterInfo{
 		Name: m.name, Label: "Mock Simulator (lab / dry-run)",
 		Kind: KindLab, Effectiveness: 1,
-		Capabilities: m.Capabilities(),
+		Capabilities:    m.Capabilities(),
 		RecommendedWhen: "Testing UI and policy flow only — touches no real packets.",
-		Requires: "Nothing (always available).",
-		Description: "In-memory fake. Use Dry Run to preview policy without dropping traffic.",
-		Warning: "Does NOT block or shape real traffic.",
-		LabOnly: true, TestOnly: true,
+		Requires:        "Nothing (always available).",
+		Description:     "In-memory fake. Use Dry Run to preview policy without dropping traffic.",
+		Warning:         "Does NOT block or shape real traffic.",
+		LabOnly:         true, TestOnly: true,
 		SupportsQuarantine: true, SupportsShaping: true,
 	}
 }
@@ -278,16 +279,16 @@ func MarkRecommended(ranked []RankedAdapter) []RankedAdapter {
 		ranked[i].Reason = recommendReason(ranked[i])
 	}
 	for i := range ranked {
-		if ranked[i].SupportsAction && ranked[i].Available && !ranked[i].Info.LabOnly && !ranked[i].Info.TestOnly {
+		if ranked[i].SupportsAction && ranked[i].Available && !ranked[i].Info.LabOnly && !ranked[i].Info.TestOnly && !ranked[i].Info.ExplicitSelection {
 			ranked[i].Recommended = true
 			ranked[i].Reason = "Recommended for this gateway — " + ranked[i].Info.RecommendedWhen
 			break
 		}
 	}
-	// Fallback: if nothing available, recommend top supporting (user must fix Requires).
+	// Fallback: recommend an automatic choice; manual-only adapters stay unselected.
 	if !anyRecommended(ranked) {
 		for i := range ranked {
-			if ranked[i].SupportsAction {
+			if ranked[i].SupportsAction && !ranked[i].Info.ExplicitSelection {
 				ranked[i].Recommended = true
 				ranked[i].Reason = "Best option once online — " + ranked[i].Info.Requires
 				break

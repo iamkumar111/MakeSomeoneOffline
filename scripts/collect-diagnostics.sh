@@ -10,6 +10,7 @@ if command -v node >/dev/null 2>&1; then node --version; fi
 if command -v npm >/dev/null 2>&1; then npm --version; fi
 case "$(uname -s)" in
     Darwin)
+        sysctl net.inet.ip.forwarding net.inet6.ip6.forwarding
         /sbin/route -n get default
         /usr/sbin/arp -an
         /sbin/ifconfig

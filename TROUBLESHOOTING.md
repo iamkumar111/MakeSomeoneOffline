@@ -53,7 +53,9 @@ do not all pass through the dashboard's fetch logger.
 | Permission denied / Administrator required | Elevate the Windows server for live cuts. Linux enforcement needs documented root/capabilities. macOS discovery/previews need no sudo. |
 | Forwarding enabled / unknown | Side-host cuts require forwarding off. Inspect routing/ICS with the administrator. Unknown state fails closed. Gateway routing differs. |
 | Linux nft/tc unavailable or rule failure | Install nftables/iproute2; check capabilities and selected LAN interface. Inspect `nft list table inet open_netcut` read-only; do not flush unrelated rules. |
-| macOS live quarantine/rate limiting unavailable | Expected for initial version: discovery and Dry Run only. Use a Linux enforcement host for real cuts. |
+| macOS BPF adapter offline / live request rejected | Check ENABLE_MACOS_L2_ARP=1, server root privileges, both forwarding settings OFF and physical enN routes. Explicitly select macos_sidehost. Rate limiting remains unavailable. |
+| macOS BPF open/ioctl/injection error | Run mac-tool probe (no packets). Check Ethernet link type, permissions/busy descriptors and Wi-Fi driver behavior. Probe success does not prove isolation. |
+| macOS partial apply / restoration incomplete | Save Audit/server logs and use Restore. Failed cleanup keeps a visible Restore/TTL owner. Do not repeat quarantine on that target. |
 | Missing device / incomplete ARP / gateway MAC missing | Check LAN/guest isolation, macOS local-network permission, VPN and native route/ARP tables. Ping the known gateway once to populate its neighbor entry. |
 | Zero quarantined but preview exists | Expected: previews and shaping do not count. Applied live quarantines drive status; duplicate records count as one device. |
 | Live cut absent from Devices/filter | Compare device IDs and successful `/api/v1/devices` / `/api/v1/enforcements` responses. Check inventory, stale UI and Console; save request IDs. |

@@ -1,11 +1,11 @@
-# macOS: Initial Version
+# macOS: Setup and BPF Quarantine
 
 For retained logs and unresponsive buttons, see
 [Troubleshooting for all platforms](TROUBLESHOOTING.md).
 
-Available: dashboard, LAN IPv4 discovery, native gateway detection, and dry-run
-previews. Live quarantine, release of real cuts, packet monitoring, and bandwidth
-shaping are not implemented for macOS. Live enforcement requests return an error.
+Discovery/dashboard/previews work without root. Experimental live quarantine
+uses native BPF (`macos_sidehost`), saved-mapping restoration and TTL.
+No Npcap, libpcap installation or CGO is needed. Rate limiting is unavailable.
 
 ## Install and build
 
@@ -21,19 +21,50 @@ sh scripts/build-macos.sh
 ```
 
 Intel Macs: replace `arm64` with `amd64`. Keep `web/dist` beside the `bin`
-folder. Run from the project root. No sudo is needed for this initial version.
+folder. Run from the project root. No sudo is needed for discovery/previews.
 Open [localhost:8080](http://localhost:8080); no token or login is needed locally.
 
-## Verify
+## Enable and verify live BPF quarantine
 
-1. Check your gateway with `/sbin/route -n get default` and neighbors with
-   `/usr/sbin/arp -an`. Incomplete neighbors are intentionally excluded.
-2. Allow any macOS local-network permission prompt. Wait for discovery and
-   compare a test device's IP/MAC with the ARP table.
-3. Select the device, choose the mock simulator, and enable **Dry Run**.
-   Apply a 60-second preview. The device should stay online and the live cut
-   count should remain zero. Restore the preview or let its TTL expire.
-4. A request with Dry Run off must report that macOS live quarantine is unavailable.
+Use a separate test device on your own LAN. Stop the ordinary server first.
+Gateway and target must be on the same IPv4 subnet and physical `enN` interface.
+Ethernet is preferable for testing; Wi-Fi drivers may reject or rewrite frames.
+
+1. Turn off Internet Sharing/routing. Check both settings and native neighbors:
+
+   ```sh
+   sysctl net.inet.ip.forwarding net.inet6.ip6.forwarding
+   /sbin/route -n get default
+   /usr/sbin/arp -an
+   ```
+
+   Both forwarding values must be `0`. Unknown state is rejected. Do not use
+   this side-host adapter on a Mac acting as a gateway.
+2. Probe permissions/interface configuration; **no packets are sent**:
+
+   ```sh
+   sudo env ENABLE_MACOS_L2_ARP=1 ./bin/mac-tool-arm64 probe
+   ```
+
+   `ready_for_injection: true` means BPF opened/configured. It does not prove
+   driver injection or isolation. Optional `-target 192.168.1.24` checks a
+   specific device's route/cache; use its actual IP.
+3. Start the server with explicit opt-in and privileges:
+
+   ```sh
+   sudo env ENABLE_MACOS_L2_ARP=1 ./bin/open-netcut-macos-arm64 -port 8080 -db ./netcut.json
+   ```
+
+   Keep it running. Allow macOS local-network permission if prompted.
+4. Select the test device → Quarantine Device → manually select
+   **macOS Side-Host — BPF ARP quarantine**. It is never auto-selected.
+5. Test Dry Run first: device stays online; live count stays zero.
+6. Disable Dry Run, select **1 minute (test)**, apply, and check fresh IPv4/IPv6
+   connections on the target. Restore and verify recovery; repeat and let TTL
+   expire. Restoration takes about five seconds.
+
+IPv6 NDP is best effort, using genuine neighbor mappings known before injection.
+Applied status does not prove complete isolation. Native Mac/LAN testing is required.
 
 ## Troubleshooting
 
@@ -41,9 +72,25 @@ Open [localhost:8080](http://localhost:8080); no token or login is needed locall
   and guest-network isolation. Devices outside the local IPv4 neighbor cache
   may not appear. IPv6-only discovery is not implemented in this version.
 - **Blank page:** build the dashboard and start from the project root.
+- **Offline adapter:** check opt-in, server root privileges and both forwarding
+  settings. Elevating only the probe does not elevate the server.
+- **Gateway/target MAC missing or changed:** inspect ARP, ping the known gateway
+  once to populate its cache, then refresh discovery. Changed target MACs are rejected.
+- **Wrong interface / VPN:** default and target routes must use the same physical
+  `enN`. Remote routed subnets, tunnels, bridges and non-Ethernet BPF types are rejected.
+- **BPF busy/denied:** inspect permissions and capture applications. Busy
+  descriptors are skipped; actual open/ioctl errors appear in the probe.
+- **Injection/restore failure:** save Audit and `logs/control-plane.log*`.
+  Incomplete restoration keeps a visible Restore/TTL owner. A partial apply
+  can return an error and still require Restore; do not repeat quarantine.
+- **Stopping:** Ctrl+C attempts restoration. Forced termination cannot guarantee
+  healing; multiple cuts may exceed the shutdown budget. Inspect logs and target recovery.
+- **Root-created database/logs:** reuse the same privileges, or select writable
+  `-db`/`-log-dir` paths when switching back to preview mode.
 - **App blocked:** use your organization's approved signing/development process.
   Downloaded releases need signing/notarization before general distribution.
-- **Remote access:** set `NETCUT_API_TOKEN` and explicitly use `-listen 0.0.0.0`.
+- **Remote access:** set `NETCUT_API_TOKEN` in the privileged server environment
+  and explicitly use `-listen 0.0.0.0`.
   Put remote access behind an HTTPS proxy. Remote clients require the token;
   local access requires a loopback Host and peer with no forwarding headers.
 

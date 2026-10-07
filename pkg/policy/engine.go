@@ -147,8 +147,8 @@ func (pe *PolicyEngine) ApplyQuarantineBreakGlass(ctx context.Context, device *m
 }
 
 func (pe *PolicyEngine) applyQuarantineInner(ctx context.Context, device *models.Device, adapterName string, ttl time.Duration, actor string, dryRun bool, breakGlassReason string) (*models.Enforcement, error) {
-	if runtime.GOOS == "darwin" && !dryRun {
-		return nil, fmt.Errorf("macOS live quarantine is not available; enable Dry Run or use a Linux enforcement host")
+	if runtime.GOOS == "darwin" && !dryRun && adapterName != "macos_sidehost" {
+		return nil, fmt.Errorf("macOS live quarantine requires explicit macos_sidehost selection; use Dry Run for simulations")
 	}
 	if protected, why := pe.IsProtected(device.PrimaryIP, device.PrimaryMAC); protected && breakGlassReason == "" {
 		pe.recordAudit(actor, "quarantine_rejected", "device", device.ID, fmt.Sprintf("Rejected: %s", why), "failed")
@@ -194,6 +194,9 @@ func (pe *PolicyEngine) applyQuarantineInner(ctx context.Context, device *models
 		}
 	}
 
+	if runtime.GOOS == "darwin" && !dryRun && adapter.Name() != "macos_sidehost" {
+		return nil, fmt.Errorf("macOS live quarantine adapter unavailable; refusing simulator fallback")
+	}
 	enf := &models.Enforcement{
 		ID:           uuid.New().String(),
 		DeviceID:     device.ID,
@@ -215,8 +218,15 @@ func (pe *PolicyEngine) applyQuarantineInner(ctx context.Context, device *models
 
 	// Execute through adapter
 	if err := adapter.ApplyQuarantine(ctx, enf); err != nil {
-		enf.ActualState = models.StateFailed
 		enf.ErrorMessage = err.Error()
+		if enf.ActualState == models.StateApplied {
+			// Partial injection with failed cleanup still needs a visible Restore/TTL owner.
+			pe.mu.Lock()
+			pe.enforcements[enf.ID] = enf
+			pe.mu.Unlock()
+		} else {
+			enf.ActualState = models.StateFailed
+		}
 		pe.recordAudit(actor, "quarantine", "device", device.ID, fmt.Sprintf("Failed: %v", err), "failed")
 		pe.eventBus.Publish(events.EventEnforcementFailed, device.SiteID, enf)
 		return enf, fmt.Errorf("adapter failed to apply quarantine: %w", err)

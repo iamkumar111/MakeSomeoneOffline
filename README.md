@@ -12,7 +12,7 @@ the dashboard can download browser troubleshooting history.
 ---
 
 > [!IMPORTANT]
-> **Platform support**: Linux gateway deployments provide kernel enforcement and traffic shaping. Native Windows builds provide dashboard/discovery, dry-runs, and experimental Npcap side-host quarantine. Follow the [Windows setup guide](WINDOWS_SETUP_AND_TEST_GUIDE.md), including Application Control / Intune requirements. The initial [macOS version](MACOS_SETUP_AND_TEST_GUIDE.md) supports discovery and dry-run previews; live macOS enforcement is unavailable.
+> **Platform support**: Linux gateway deployments provide kernel enforcement and traffic shaping. Native Windows builds provide dashboard/discovery, dry-runs, and experimental Npcap side-host quarantine. Follow the [Windows setup guide](WINDOWS_SETUP_AND_TEST_GUIDE.md), including Application Control / Intune requirements. The [macOS version](MACOS_SETUP_AND_TEST_GUIDE.md) provides discovery, previews, and experimental native BPF side-host quarantine; native Mac/LAN validation is still required.
 
 ---
 
@@ -44,6 +44,7 @@ Open-NetCut runs on any modern Linux system (Kernel 5.4+) with `root` or `CAP_NE
 | Control plane **runs on the gateway** (native, root) | `linux_nftables` + `linux_tc` (★ recommended, auto-selected) | Yes |
 | Side host, unmanaged ISP router | `l2_arp` — ARP enforcement, explicit opt-in (`ENABLE_L2_ARP=1`), own networks only, disruptive by design | Yes |
 | Native Windows side host | `windows_sidehost` via Npcap; explicit selection, Administrator, forwarding OFF | Same LAN; validate on target |
+| Native macOS side host | `macos_sidehost` via BPF; `ENABLE_MACOS_L2_ARP=1`, root, IPv4/IPv6 forwarding OFF | Same LAN; experimental, validate on actual Mac/interface |
 
 `mock_simulator` is lab-only and touches no real packets. The UI ranks every
 adapter live (`/api/v1/integrations?action=quarantine`) and pre-selects the
