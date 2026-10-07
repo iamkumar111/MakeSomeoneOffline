@@ -3,12 +3,16 @@
 package adapters
 
 import (
+	"context"
 	"fmt"
 	"net"
-	"os"
+	"os/exec"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
+
+	"github.com/open-netcut/open-netcut/pkg/discovery"
 )
 
 // Minimal dynamic Npcap binding. wpcap.dll is loaded at runtime so the
@@ -153,29 +157,55 @@ func npcapClose(handle uintptr) {
 	}
 }
 
-// selectDevice picks the capture device: NETCUT_WIN_IFACE override (NPF name
-// substring or IPv4), else the first private-LAN IPv4 device.
-func selectDevice(devices [][2]string) (name, ip string, err error) {
-	if len(devices) == 0 {
-		return "", "", fmt.Errorf("no Npcap devices with IPv4 addresses found")
+// probeGatewayIP best-effort resolves the default gateway (empty on failure;
+// selection then falls back to first-private-IP heuristics).
+func probeGatewayIP() string {
+	out, err := exec.Command("route", "print", "-4").CombinedOutput()
+	if err != nil {
+		return ""
 	}
-	if want := strings.TrimSpace(strings.ToLower(os.Getenv("NETCUT_WIN_IFACE"))); want != "" {
-		for _, d := range devices {
-			if strings.Contains(strings.ToLower(d[0]), want) || strings.ToLower(d[1]) == want {
-				return d[0], d[1], nil
-			}
-		}
-		return "", "", fmt.Errorf("NETCUT_WIN_IFACE %q matched no Npcap device", want)
-	}
-	for _, d := range devices {
-		if ip := net.ParseIP(d[1]); ip != nil && ip.IsPrivate() && !ip.IsLoopback() {
-			return d[0], d[1], nil
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 3 && fields[0] == "0.0.0.0" && fields[1] == "0.0.0.0" {
+			return fields[2]
 		}
 	}
-	for _, d := range devices {
-		if ip := net.ParseIP(d[1]); ip != nil && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() {
-			return d[0], d[1], nil
-		}
+	return ""
+}
+
+// windowsNDPAddrs returns cached IPv6 addresses for a MAC (link-locals
+// first) from `netsh interface ipv6 show neighbors`.
+func windowsNDPAddrs(ctx context.Context, mac net.HardwareAddr) []net.IP {
+	cmdCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(cmdCtx, "netsh", "interface", "ipv6", "show", "neighbors").CombinedOutput()
+	if err != nil {
+		return nil
 	}
-	return devices[0][0], devices[0][1], nil
+	return linkLocalsFirst(discovery.ParseNetshIPv6Neighbors(string(out))[strings.ToLower(mac.String())])
+}
+
+// ProbeWindowsInjection validates the whole Npcap path without touching the
+// network: enumerate devices, select the LAN interface, resolve our MAC,
+// open the capture handle, close it. Any struct-layout or calling-convention
+// bug in this binding surfaces here instead of mid-quarantine.
+func ProbeWindowsInjection() (device, ip, mac string, err error) {
+	devices, err := npcapIPv4Devices()
+	if err != nil {
+		return "", "", "", err
+	}
+	devName, devIP, err := selectDevice(devices, probeGatewayIP())
+	if err != nil {
+		return "", "", "", err
+	}
+	hostMAC, err := windowsHostMAC(devIP)
+	if err != nil {
+		return "", "", "", err
+	}
+	handle, err := npcapOpen(devName)
+	if err != nil {
+		return "", "", "", err
+	}
+	npcapClose(handle)
+	return devName, devIP, hostMAC.String(), nil
 }

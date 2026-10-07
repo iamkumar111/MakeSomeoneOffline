@@ -24,6 +24,8 @@ func main() {
 	switch os.Args[1] {
 	case "doctor":
 		runDoctor()
+	case "probe":
+		runProbe()
 	case "scan":
 		runScan(os.Args[2:])
 	case "cut":
@@ -42,6 +44,7 @@ func printUsage() {
 	fmt.Println("\nUsage: win-tool <command>")
 	fmt.Println("\nCommands:")
 	fmt.Println("  doctor             Check admin, drivers, interface, and gateway readiness")
+	fmt.Println("  probe              Safe Npcap open/close test (sends nothing) — run before live cuts")
 	fmt.Println("  scan [--json]      List neighbors from the local ARP table")
 	fmt.Println("  cut <ip|mac|id> [--ttl seconds] [--dry-run]")
 	fmt.Println("                     Cut a device via the local control plane (windows_sidehost)")

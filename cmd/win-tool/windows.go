@@ -14,6 +14,8 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+
+	"github.com/open-netcut/open-netcut/pkg/adapters"
 )
 
 type doctorReport struct {
@@ -23,6 +25,7 @@ type doctorReport struct {
 	Interface       string `json:"interface"`
 	IPv4            string `json:"ipv4"`
 	Gateway         string `json:"gateway"`
+	GatewayMAC      string `json:"gateway_mac"`
 	Ready           bool   `json:"ready_for_live_cut"`
 }
 
@@ -36,11 +39,51 @@ func runDoctor() {
 	report.Interface = iface
 	report.IPv4 = ip
 	report.Gateway = defaultGateway()
-	report.Ready = report.Admin && report.NpcapService == "running" && report.Gateway != ""
+	report.GatewayMAC = gatewayMAC(report.Gateway)
+	// Gateway MAC must already be in the ARP cache: Apply refuses when it
+	// cannot resolve it (ping the gateway once if this is empty).
+	report.Ready = report.Admin && report.NpcapService == "running" &&
+		report.Gateway != "" && report.GatewayMAC != ""
 	emitJSON(report)
 	if !report.Ready {
 		os.Exit(2)
 	}
+}
+
+func gatewayMAC(gateway string) string {
+	if gateway == "" {
+		return ""
+	}
+	var buf bytes.Buffer
+	cmd := exec.Command("arp", "-a")
+	cmd.Stdout = &buf
+	if err := cmd.Run(); err != nil {
+		return ""
+	}
+	for _, n := range ParseWindowsArp(buf.String()) {
+		if n.IPAddress == gateway && n.MACAddress != "" {
+			return n.MACAddress
+		}
+	}
+	return ""
+}
+
+// runProbe exercises the real Npcap path (enumerate → select → open → close)
+// without sending anything. Run this BEFORE any live cut: it catches binding,
+// driver, and interface-selection bugs with zero network impact.
+func runProbe() {
+	dev, ip, mac, err := adapters.ProbeWindowsInjection()
+	out := map[string]interface{}{
+		"probe": "npcap-open-close", "device": dev, "ip": ip, "mac": mac,
+	}
+	if err != nil {
+		out["ok"] = false
+		out["error"] = err.Error()
+		emitJSON(out)
+		os.Exit(1)
+	}
+	out["ok"] = true
+	emitJSON(out)
 }
 
 func isAdmin() bool {

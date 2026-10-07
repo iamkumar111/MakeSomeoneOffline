@@ -894,6 +894,7 @@ export default function App() {
             <span>{wsConnected ? 'Realtime Connected' : 'Syncing'}</span>
           </div>
           {lastSeq > 0 && <span className="font-mono text-xs">Seq: {lastSeq}</span>}
+          <span className="font-mono text-xs" title="Dashboard bundle build time — if this looks old next to a fresh binary, re-copy web/dist">UI {typeof __UI_BUILD__ !== 'undefined' ? __UI_BUILD__ : 'dev'}</span>
         </div>
       </aside>
 

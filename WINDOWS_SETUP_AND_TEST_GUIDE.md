@@ -141,7 +141,31 @@ $env:OPEN_NETCUT_SERVER = "http://192.168.1.10:8080"
 ```
 
 `doctor` exits `0` only when the host is ready for a live cut; otherwise it
-prints exactly what is missing and exits `2`.
+prints exactly what is missing and exits `2`. It now also checks that the
+gateway MAC is already in the ARP cache — a missing entry guarantees a
+refused cut later, so `ping` the gateway once if `gateway_mac` is empty.
+
+### 6b. Pre-flight Npcap probe (do this before any live cut)
+
+```powershell
+.\win-tool.exe probe
+```
+
+This enumerates Npcap devices, selects the LAN interface, resolves your MAC,
+and opens + closes the capture handle — **without sending any packet**.
+Expected: `"ok": true` with your device/IP/MAC. If it fails, stop here and
+report the error: a live cut would fail the same way, but louder.
+
+### 6c. Multi-homed hosts (VM/VPN adapters present)
+
+Device selection is automatic: `NETCUT_WIN_IFACE` override → gateway's /24 →
+first private IPv4 → fallback. If `probe` shows the wrong NIC, pin it:
+
+```powershell
+# NPF name fragment or the interface IPv4 both work
+$env:NETCUT_WIN_IFACE = "Wi-Fi"
+.\win-tool.exe probe
+```
 
 ---
 
@@ -157,6 +181,13 @@ prints exactly what is missing and exits `2`.
 - [ ] Victim internet still works (dry-run must never block).
 - [ ] Quarantine tab shows the enforcement with `dry_run: yes`.
 - [ ] A subsequent **real** cut is NOT blocked by the dry-run record.
+
+### Test 1b — Confirm the dashboard build
+
+The sidebar footer shows a `UI <timestamp>` stamp. It must match the binary
+you deployed — a stale `web\dist` next to a fresh EXE shows old behavior
+with no error. After copying new files, hard-refresh the browser (`Ctrl+F5`)
+and check the stamp before testing.
 
 ### Test 2 — Short live cut + manual heal
 
@@ -202,6 +233,21 @@ Dashboard: **Block All Internet** (short reason required).
 - Enable IP forwarding temporarily: cut must be **refused** with the forwarding message.
 - Stop Npcap: adapter shows unavailable.
 
+### Test 6 — Dual-stack (IPv6) cut
+
+On a dual-stack victim, cut and then check **both** stacks:
+
+```powershell
+# on the victim: IPv4 should fail, and IPv6 too (ping -6)
+ping 8.8.8.8
+ping -6 2001:4860:4860::8888
+```
+
+- [ ] Both fail while cut; both recover after `heal`.
+- [ ] If IPv6 stays up, capture `netsh interface ipv6 show neighbors` on the
+ enforcement host before/during the cut and report it — NDP pairing depends
+ on neighbor-cache visibility.
+
 ---
 
 ## 8. Troubleshooting
@@ -212,6 +258,8 @@ Dashboard: **Block All Internet** (short reason required).
 | Cut rejected: administrator required | Normal PowerShell | Run as Administrator |
 | Cut rejected: forwarding ON | `IPEnableRouter=0x1` | Set to `0`, reboot, re-check |
 | Cut rejected: gateway unresolvable | No default route / VPN active | Disconnect VPN, ensure DHCP gateway reachable |
+| Cut hits the wrong network | VM/VPN adapter auto-selected | Set `$env:NETCUT_WIN_IFACE`, re-run `probe` |
+| `doctor` not ready: `gateway_mac` empty | Gateway not in ARP cache yet | `ping` the gateway once, re-run `doctor` |
 | Victim unaffected | AP/client isolation, DAI/port-security switch, static ARP entry, or VPN on victim | Use an unmanaged switch/AP without isolation for the lab |
 | Victim reachable over IPv6 only | **Known limitation:** Windows adapter currently poisons ARP (IPv4) only; NDP spoofing is not implemented yet | Test IPv4, or force victim to IPv4 for the lab |
 | Dashboard blank | `web\dist` missing next to the EXE | Rebuild web assets and keep the folder layout from section 4 |
@@ -233,7 +281,8 @@ Dashboard: **Block All Internet** (short reason required).
 
 ## 10. Known Limitations (Windows, current build)
 
-- IPv4 ARP quarantine only; **no IPv6 NDP spoofing yet** — dual-stack victims may stay online over v6.
+- IPv4 ARP + IPv6 NDP quarantine are both implemented; NDP pairing needs lab
+ validation on real dual-stack victims (Test 6 below).
 - No per-device traffic shaping on Windows (Linux `tc` gateway only).
 - No WinDivert drop stage yet — drops rely on forwarding being OFF so attracted traffic dies on this host.
 - Binaries are unsigned — expect SmartScreen/AV prompts; allowlist explicitly instead of disabling security products.

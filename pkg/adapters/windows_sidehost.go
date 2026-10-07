@@ -167,7 +167,7 @@ func (a *WindowsSideHostAdapter) ApplyQuarantine(ctx context.Context, e *models.
 	if err != nil {
 		return fmt.Errorf("refusing cut: %v (install Npcap)", err)
 	}
-	devName, devIP, err := selectDevice(devices)
+	devName, devIP, err := selectDevice(devices, gwIPStr)
 	if err != nil {
 		return fmt.Errorf("refusing cut: %v", err)
 	}
@@ -228,6 +228,17 @@ func (a *WindowsSideHostAdapter) ApplyQuarantine(ctx context.Context, e *models.
 		}
 	}()
 
+	// Pair the v4 cut with NDP spoofing when both sides have IPv6 neighbor
+	// addresses; otherwise dual-stack victims stay online over v6.
+	// Best effort: v4 enforcement stands regardless.
+	if victimIPs := windowsNDPAddrs(ctx, targetMAC); len(victimIPs) > 0 {
+		if gwIPs := windowsNDPAddrs(ctx, gwMAC); len(gwIPs) > 0 {
+			go runNAStorm(stop, func(_ net.HardwareAddr, f []byte) {
+				_ = npcapSend(handle, f)
+			}, hostMAC, targetMAC, gwMAC, victimIPs, gwIPs, true)
+		}
+	}
+
 	now := time.Now().UTC()
 	e.AppliedAt = &now
 	e.ActualState = models.StateApplied
@@ -258,6 +269,14 @@ func (a *WindowsSideHostAdapter) RemoveQuarantine(_ context.Context, e *models.E
 		time.Sleep(healInterval)
 		for _, hp := range healingFrames(gwIP, gwMAC, targetIP, targetMAC) {
 			_ = npcapSend(cut.handle, hp.frame)
+		}
+		// Restore v6 caches too when neighbor addresses are known.
+		if victimIPs := windowsNDPAddrs(context.Background(), targetMAC); len(victimIPs) > 0 {
+			if gwIPs := windowsNDPAddrs(context.Background(), gwMAC); len(gwIPs) > 0 {
+				for _, hp := range healingNAFrames(gwIPs, gwMAC, victimIPs, targetMAC) {
+					_ = npcapSend(cut.handle, hp.frame)
+				}
+			}
 		}
 	}
 	npcapClose(cut.handle)
