@@ -7,6 +7,86 @@ import (
 	"strings"
 )
 
+type localIPv4Interface struct {
+	mac     net.HardwareAddr
+	network *net.IPNet
+}
+
+// localIPv4Interfaces uses the OS address table as the authority for local
+// addresses. Npcap can still report an old address after a DHCP/adapter change.
+func localIPv4Interfaces() ([]localIPv4Interface, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+	var out []localIPv4Interface
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 || len(iface.HardwareAddr) != 6 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			return nil, fmt.Errorf("read addresses for %s: %w", iface.Name, err)
+		}
+		for _, addr := range addrs {
+			if network, ok := addr.(*net.IPNet); ok && network.IP.To4() != nil {
+				out = append(out, localIPv4Interface{mac: iface.HardwareAddr, network: network})
+			}
+		}
+	}
+	return out, nil
+}
+
+// selectLocalDevice joins capture addresses to active local interfaces before
+// selection, and requires an on-link path to the gateway and quarantine target.
+// A remote or stale capture address must never be used as our host address.
+func selectLocalDevice(devices [][2]string, locals []localIPv4Interface, gatewayIP, targetIP string) (name, ip string, mac net.HardwareAddr, err error) {
+	gw := net.ParseIP(gatewayIP)
+	if gw == nil || gw.To4() == nil {
+		return "", "", nil, fmt.Errorf("invalid LAN gateway IPv4 %q", gatewayIP)
+	}
+	var target net.IP
+	if targetIP != "" {
+		target = net.ParseIP(targetIP)
+		if target == nil || target.To4() == nil {
+			return "", "", nil, fmt.Errorf("invalid target IPv4 %q", targetIP)
+		}
+	}
+	var eligible [][2]string
+	macs := make(map[string]net.HardwareAddr)
+	for _, d := range devices {
+		captureIP := net.ParseIP(d[1])
+		for _, local := range locals {
+			if local.network == nil || len(local.mac) != 6 || !local.network.IP.Equal(captureIP) {
+				continue
+			}
+			if !local.network.Contains(gw) || (target != nil && !local.network.Contains(target)) {
+				continue
+			}
+			eligible = append(eligible, d)
+			macs[d[1]] = local.mac
+			break
+		}
+	}
+	if len(eligible) == 0 {
+		var details strings.Builder
+		for _, d := range devices {
+			fmt.Fprintf(&details, "\n  Npcap: %s (%s)", d[0], d[1])
+		}
+		for _, local := range locals {
+			if local.network != nil {
+				fmt.Fprintf(&details, "\n  Local: %s (MAC %s)", local.network, local.mac)
+			}
+		}
+		return "", "", nil, fmt.Errorf("no active local LAN interface exposed by Npcap can reach gateway %s and target %s; check the LAN connection and restart Npcap after address changes; candidates:%s", gatewayIP, targetIP, details.String())
+	}
+	name, ip, err = selectDevice(eligible, gatewayIP)
+	if err != nil {
+		return "", "", nil, err
+	}
+	return name, ip, macs[ip], nil
+}
+
 // Pure Npcap device-selection logic (no syscalls): portable and unit-tested.
 // The Windows transport feeds it enumeration results.
 

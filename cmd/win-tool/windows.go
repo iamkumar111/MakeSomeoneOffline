@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -16,17 +15,21 @@ import (
 	"time"
 
 	"github.com/open-netcut/open-netcut/pkg/adapters"
+	"github.com/open-netcut/open-netcut/pkg/apiclient"
 )
 
 type doctorReport struct {
-	Admin           bool   `json:"admin"`
-	NpcapService    string `json:"npcap_service"`
-	WinDivertStatus string `json:"windivert_status"`
-	Interface       string `json:"interface"`
-	IPv4            string `json:"ipv4"`
-	Gateway         string `json:"gateway"`
-	GatewayMAC      string `json:"gateway_mac"`
-	Ready           bool   `json:"ready_for_live_cut"`
+	Admin             bool     `json:"admin"`
+	NpcapService      string   `json:"npcap_service"`
+	WinDivertStatus   string   `json:"windivert_status"`
+	Interface         string   `json:"interface"`
+	IPv4              string   `json:"ipv4"`
+	Gateway           string   `json:"gateway"`
+	GatewayMAC        string   `json:"gateway_mac"`
+	ForwardingEnabled *bool    `json:"ip_forwarding_enabled"`
+	ProbeOK           bool     `json:"npcap_probe_ok"`
+	Blockers          []string `json:"blockers"`
+	Ready             bool     `json:"ready_for_live_cut"`
 }
 
 func runDoctor() {
@@ -34,16 +37,38 @@ func runDoctor() {
 		Admin:           isAdmin(),
 		NpcapService:    serviceState("npcap"),
 		WinDivertStatus: serviceState("windivert"),
+		Blockers:        []string{},
 	}
-	iface, ip := primaryIPv4()
-	report.Interface = iface
+	if !report.Admin {
+		report.Blockers = append(report.Blockers, "Run PowerShell as Administrator for live quarantine.")
+	}
+	forwarding, err := adapters.WindowsForwardingState()
+	if err != nil {
+		report.Blockers = append(report.Blockers, err.Error())
+	} else {
+		report.ForwardingEnabled = &forwarding
+		if forwarding {
+			report.Blockers = append(report.Blockers, "IP forwarding is enabled; side-host quarantine requires it OFF. See WINDOWS_SETUP_AND_TEST_GUIDE.md.")
+		}
+	}
+	dev, ip, _, err := adapters.ProbeWindowsInjection()
+	report.Interface = dev
 	report.IPv4 = ip
+	report.ProbeOK = err == nil
+	if err != nil {
+		report.Blockers = append(report.Blockers, "Npcap probe: "+err.Error())
+	}
 	report.Gateway = defaultGateway()
 	report.GatewayMAC = gatewayMAC(report.Gateway)
 	// Gateway MAC must already be in the ARP cache: Apply refuses when it
 	// cannot resolve it (ping the gateway once if this is empty).
-	report.Ready = report.Admin && report.NpcapService == "running" &&
-		report.Gateway != "" && report.GatewayMAC != ""
+	if report.Gateway == "" {
+		report.Blockers = append(report.Blockers, "No IPv4 default gateway found; check the LAN connection and VPN routes.")
+	} else if report.GatewayMAC == "" {
+		report.Blockers = append(report.Blockers, "Gateway MAC is absent from the ARP cache; ping the gateway once, then retry doctor.")
+	}
+	// Successful opening of Npcap is authoritative; its service may start on demand.
+	report.Ready = len(report.Blockers) == 0
 	emitJSON(report)
 	if !report.Ready {
 		os.Exit(2)
@@ -107,30 +132,6 @@ func serviceState(name string) string {
 	}
 }
 
-func primaryIPv4() (string, string) {
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return "", ""
-	}
-	for _, iface := range ifaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-		for _, addr := range addrs {
-			if ipnet, ok := addr.(*net.IPNet); ok {
-				if ip := ipnet.IP.To4(); ip != nil {
-					return iface.Name, ip.String()
-				}
-			}
-		}
-	}
-	return "", ""
-}
-
 func defaultGateway() string {
 	out, err := exec.Command("route", "print", "-4").CombinedOutput()
 	if err != nil {
@@ -165,6 +166,9 @@ func resolveDeviceID(client *http.Client, target string) (string, error) {
 		return "", fmt.Errorf("control plane not reachable at %s: %v", apiBase(), err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("device lookup rejected by control plane (HTTP %d)", resp.StatusCode)
+	}
 	var devices []apiDevice
 	if err := json.NewDecoder(resp.Body).Decode(&devices); err != nil {
 		return "", err
@@ -204,7 +208,7 @@ func runCut(args []string) {
 			i++
 		}
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := apiclient.New(30 * time.Second)
 	id, err := resolveDeviceID(client, target)
 	if err != nil {
 		fmt.Println("Error:", err)
@@ -229,6 +233,10 @@ func runCut(args []string) {
 		fmt.Println("Already cut — existing enforcement returned, no duplicate loop started.")
 		return
 	}
+	if dryRun {
+		fmt.Printf("Dry-run recorded (TTL %ds); no traffic blocked.\n", ttl)
+		return
+	}
 	fmt.Printf("Cut applied via windows_sidehost (TTL %ds). Verify the victim, then heal with: win-tool heal %s\n", ttl, target)
 }
 
@@ -237,7 +245,7 @@ func runHeal(args []string) {
 		fmt.Println("Usage: win-tool heal <ip|mac|id>")
 		os.Exit(1)
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := apiclient.New(30 * time.Second)
 	id, err := resolveDeviceID(client, args[0])
 	if err != nil {
 		fmt.Println("Error:", err)

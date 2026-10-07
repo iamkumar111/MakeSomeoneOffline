@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -43,17 +45,67 @@ type pcapIf struct {
 }
 
 var (
-	wpcapDLL        = syscall.NewLazyDLL("wpcap.dll")
-	procFindalldevs = wpcapDLL.NewProc("pcap_findalldevs")
-	procFreealldevs = wpcapDLL.NewProc("pcap_freealldevs")
-	procOpenLive    = wpcapDLL.NewProc("pcap_open_live")
-	procSendpacket  = wpcapDLL.NewProc("pcap_sendpacket")
-	procClose       = wpcapDLL.NewProc("pcap_close")
+	npcapLoadOnce   sync.Once
+	npcapLoadError  error
+	procFindalldevs *syscall.Proc
+	procFreealldevs *syscall.Proc
+	procOpenLive    *syscall.Proc
+	procSendpacket  *syscall.Proc
+	procClose       *syscall.Proc
 )
+
+// Restrict the library AND dependencies to the installed system directories.
+// Bare-name loading could execute a wpcap.dll/Packet.dll planted beside the EXE.
+func loadNpcap() error {
+	npcapLoadOnce.Do(func() {
+		kernel := syscall.NewLazyDLL("kernel32.dll")
+		var directory [32768]uint16
+		n, _, err := kernel.NewProc("GetSystemDirectoryW").Call(uintptr(unsafe.Pointer(&directory[0])), uintptr(len(directory)))
+		if n == 0 || n >= uintptr(len(directory)) {
+			npcapLoadError = fmt.Errorf("resolve Windows system directory: %v", err)
+			return
+		}
+		systemDir := syscall.UTF16ToString(directory[:n])
+		loader := kernel.NewProc("LoadLibraryExW")
+		for _, path := range []string{filepath.Join(systemDir, "Npcap", "wpcap.dll"), filepath.Join(systemDir, "wpcap.dll")} {
+			wide, err := syscall.UTF16PtrFromString(path)
+			if err != nil {
+				npcapLoadError = err
+				return
+			}
+			// LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32.
+			handle, _, loadErr := loader.Call(uintptr(unsafe.Pointer(wide)), 0, 0x100|0x800)
+			if handle == 0 {
+				npcapLoadError = fmt.Errorf("load %s: %v", path, loadErr)
+				continue
+			}
+			dll := &syscall.DLL{Name: path, Handle: syscall.Handle(handle)}
+			bindings := []struct {
+				name   string
+				target **syscall.Proc
+			}{
+				{"pcap_findalldevs", &procFindalldevs}, {"pcap_freealldevs", &procFreealldevs},
+				{"pcap_open_live", &procOpenLive}, {"pcap_sendpacket", &procSendpacket}, {"pcap_close", &procClose},
+			}
+			for _, binding := range bindings {
+				proc, err := dll.FindProc(binding.name)
+				if err != nil {
+					npcapLoadError = err
+					_ = dll.Release()
+					return
+				}
+				*binding.target = proc
+			}
+			npcapLoadError = nil
+			return
+		}
+	})
+	return npcapLoadError
+}
 
 // npcapAvailable reports whether wpcap.dll loads.
 func npcapAvailable() bool {
-	return wpcapDLL.Load() == nil
+	return loadNpcap() == nil
 }
 
 func cString(ptr *byte) string {
@@ -82,7 +134,7 @@ func cErr(buf *[256]byte) string {
 // npcapIPv4Devices lists capture devices that have an IPv4 address,
 // as (device name, ip) pairs.
 func npcapIPv4Devices() ([][2]string, error) {
-	if err := wpcapDLL.Load(); err != nil {
+	if err := loadNpcap(); err != nil {
 		return nil, fmt.Errorf("wpcap.dll not available: %w", err)
 	}
 	var all *pcapIf
@@ -117,7 +169,7 @@ func npcapIPv4Devices() ([][2]string, error) {
 
 // npcapOpen opens a device for raw frame injection.
 func npcapOpen(device string) (uintptr, error) {
-	if err := wpcapDLL.Load(); err != nil {
+	if err := loadNpcap(); err != nil {
 		return 0, fmt.Errorf("wpcap.dll not available: %w", err)
 	}
 	cName := append([]byte(device), 0)
@@ -194,11 +246,11 @@ func ProbeWindowsInjection() (device, ip, mac string, err error) {
 	if err != nil {
 		return "", "", "", err
 	}
-	devName, devIP, err := selectDevice(devices, probeGatewayIP())
+	locals, err := localIPv4Interfaces()
 	if err != nil {
 		return "", "", "", err
 	}
-	hostMAC, err := windowsHostMAC(devIP)
+	devName, devIP, hostMAC, err := selectLocalDevice(devices, locals, probeGatewayIP(), "")
 	if err != nil {
 		return "", "", "", err
 	}

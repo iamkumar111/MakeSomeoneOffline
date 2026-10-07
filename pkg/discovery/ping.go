@@ -2,8 +2,10 @@ package discovery
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"net"
+	"strconv"
+	"syscall"
 	"time"
 )
 
@@ -12,7 +14,7 @@ func MeasureLatency(ctx context.Context, ip string, port int, timeout time.Durat
 	if port <= 0 {
 		port = 80 // Default web port probe
 	}
-	target := fmt.Sprintf("%s:%d", ip, port)
+	target := net.JoinHostPort(ip, strconv.Itoa(port))
 
 	d := net.Dialer{Timeout: timeout}
 	start := time.Now()
@@ -32,8 +34,5 @@ func MeasureLatency(ctx context.Context, ip string, port int, timeout time.Durat
 }
 
 func isConnectionRefused(err error) bool {
-	if err == nil {
-		return false
-	}
-	return true // On LAN, dial errors often indicate active host responding with RST
+	return errors.Is(err, syscall.ECONNREFUSED)
 }

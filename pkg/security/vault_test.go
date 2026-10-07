@@ -4,6 +4,12 @@ import (
 	"testing"
 )
 
+func TestVaultRejectsDefaultKey(t *testing.T) {
+	if _, err := NewVault(""); err == nil {
+		t.Fatal("empty key silently used a known default")
+	}
+}
+
 func TestVaultEncryptionDecryption(t *testing.T) {
 	vault, err := NewVault("my-secure-cluster-passphrase-2026")
 	if err != nil {

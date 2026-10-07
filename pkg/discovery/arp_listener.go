@@ -77,6 +77,8 @@ func (s *NetworkScanner) ScanOnce(ctx context.Context) {
 	// 3. Read the OS neighbor table populated by ARP replies.
 	if runtime.GOOS == "windows" {
 		s.readWindowsArp(ctx)
+	} else if runtime.GOOS == "darwin" {
+		s.readDarwinArp(ctx)
 	} else {
 		s.readProcNetARP()
 		// 4. Read `ip neigh`
@@ -476,6 +478,9 @@ func getBroadcastIP(n *net.IPNet) net.IP {
 func GetDefaultGateway(ctx context.Context) (ip string, mac string, err error) {
 	if runtime.GOOS == "windows" {
 		return getWindowsDefaultGateway(ctx)
+	}
+	if runtime.GOOS == "darwin" {
+		return getDarwinDefaultGateway(ctx)
 	}
 	// Look up default route via `ip route show default`
 	cmd := exec.CommandContext(ctx, "ip", "route", "show", "default")

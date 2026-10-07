@@ -11,6 +11,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/open-netcut/open-netcut/pkg/apiclient"
 	"github.com/open-netcut/open-netcut/pkg/models"
 )
 
@@ -52,7 +53,7 @@ func main() {
 	}
 
 	command := args[0]
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := apiclient.New(10 * time.Second)
 
 	switch command {
 	case "status", "stats":

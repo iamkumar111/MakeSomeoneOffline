@@ -2,7 +2,9 @@ package discovery
 
 import (
 	"context"
+	"errors"
 	"net"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -29,7 +31,19 @@ func TestMeasureLatencyLocalhost(t *testing.T) {
 		t.Fatalf("expected successful measurement, got: %v", err)
 	}
 
-	if latency <= 0 || latency > 100 {
+	// Very fast connects can be below the platform clock's resolution.
+	if latency < 0 || latency > 100 {
 		t.Errorf("expected reasonable local latency, got %f ms", latency)
+	}
+}
+
+func TestOnlyConnectionRefusedCountsAsResponse(t *testing.T) {
+	if !isConnectionRefused(&net.OpError{Err: syscall.ECONNREFUSED}) {
+		t.Fatal("refusal not recognized")
+	}
+	for _, err := range []error{nil, context.DeadlineExceeded, errors.New("unreachable"), syscall.ENETUNREACH} {
+		if isConnectionRefused(err) {
+			t.Fatalf("misreported response for %v", err)
+		}
 	}
 }

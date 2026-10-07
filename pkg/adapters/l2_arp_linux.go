@@ -27,6 +27,7 @@ type L2ARPAdapter struct {
 	nft         *LinuxNFTablesAdapter
 	rawFD       int
 	activeCuts  map[string]chan struct{} // keyed by TargetIP
+	cutWorkers  map[string]*sync.WaitGroup
 	targetMACs  map[string]net.HardwareAddr
 	isAvailable bool
 	closed      bool
@@ -63,6 +64,7 @@ func NewL2ARPAdapter(gwIPStr, gwMACStr string, iface *net.Interface, nft *LinuxN
 		hostMAC:     iface.HardwareAddr,
 		nft:         nft,
 		activeCuts:  make(map[string]chan struct{}),
+		cutWorkers:  make(map[string]*sync.WaitGroup),
 		targetMACs:  make(map[string]net.HardwareAddr),
 		stopListen:  make(chan struct{}),
 		isAvailable: true,
@@ -273,20 +275,35 @@ func (a *L2ARPAdapter) ApplyQuarantine(ctx context.Context, e *models.Enforcemen
 	// If already running for this target, cancel old loop
 	if stop, ok := a.activeCuts[targetIPStr]; ok {
 		close(stop)
+		if workers := a.cutWorkers[targetIPStr]; workers != nil {
+			workers.Wait()
+		}
 		delete(a.activeCuts, targetIPStr)
 	}
 
 	stopCh := make(chan struct{})
 	a.activeCuts[targetIPStr] = stopCh
 	a.targetMACs[targetIPStr] = targetMAC
+	workers := &sync.WaitGroup{}
+	workers.Add(1)
+	if a.cutWorkers == nil {
+		a.cutWorkers = make(map[string]*sync.WaitGroup)
+	}
+	a.cutWorkers[targetIPStr] = workers
 
 	// Run periodic background poisoner
 	go func(tIP net.IP, tMAC net.HardwareAddr, stop <-chan struct{}) {
+		defer workers.Done()
 		ticker := time.NewTicker(350 * time.Millisecond)
 		defer ticker.Stop()
 
 		// Initial fast burst
 		for i := 0; i < 4; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
 			_ = a.sendARPPacket(2, a.hostMAC, tMAC, a.gwIP, tIP, a.hostMAC, tMAC)
 			_ = a.sendARPPacket(1, a.hostMAC, tMAC, a.gwIP, tIP, a.hostMAC, tMAC)
 			_ = a.sendARPPacket(2, a.hostMAC, a.gwMAC, tIP, a.gwIP, a.hostMAC, a.gwMAC)
@@ -315,7 +332,8 @@ func (a *L2ARPAdapter) ApplyQuarantine(ctx context.Context, e *models.Enforcemen
 	victimIPs := ndpAddrsForMAC(ctx, targetMAC)
 	gwIPs := ndpAddrsForMAC(ctx, a.gwMAC)
 	if len(victimIPs) > 0 && len(gwIPs) > 0 {
-		go a.startNAStorm(stopCh, targetMAC, a.gwMAC, victimIPs, gwIPs, true)
+		workers.Add(1)
+		go func() { defer workers.Done(); a.startNAStorm(stopCh, targetMAC, a.gwMAC, victimIPs, gwIPs, true) }()
 	}
 
 	now := time.Now().UTC()
@@ -325,6 +343,10 @@ func (a *L2ARPAdapter) ApplyQuarantine(ctx context.Context, e *models.Enforcemen
 }
 
 func (a *L2ARPAdapter) RemoveQuarantine(ctx context.Context, e *models.Enforcement) error {
+	if e.DryRun {
+		e.ActualState = models.StateRolledBack
+		return nil
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -333,7 +355,11 @@ func (a *L2ARPAdapter) RemoveQuarantine(ctx context.Context, e *models.Enforceme
 
 	if stop, ok := a.activeCuts[targetIPStr]; ok {
 		close(stop)
+		if workers := a.cutWorkers[targetIPStr]; workers != nil {
+			workers.Wait()
+		}
 		delete(a.activeCuts, targetIPStr)
+		delete(a.cutWorkers, targetIPStr)
 		delete(a.targetMACs, targetIPStr)
 	}
 
@@ -345,6 +371,7 @@ func (a *L2ARPAdapter) RemoveQuarantine(ctx context.Context, e *models.Enforceme
 		nftErr = a.nft.RemoveQuarantine(ctx, e)
 	}
 
+	var healErr error
 	// Heal caches with packets carrying the TRUE owners' MACs as Ethernet
 	// source (a "heal" that still claims our MAC would keep the poison alive).
 	if targetIPStr != "" && targetMACStr != "" {
@@ -353,18 +380,26 @@ func (a *L2ARPAdapter) RemoveQuarantine(ctx context.Context, e *models.Enforceme
 		if err == nil && targetIP != nil {
 			frames := healingFrames(a.gwIP, a.gwMAC, targetIP, targetMAC)
 			naFrames := healingNAFrames(ndpAddrsForMAC(ctx, a.gwMAC), a.gwMAC, ndpAddrsForMAC(ctx, targetMAC), targetMAC)
-			go func() {
-				for round := 0; round < healRounds; round++ {
-					for _, hp := range frames {
-						_ = a.sendRaw(hp.dst, hp.frame, syscall.ETH_P_ARP)
+			for round := 0; round < healRounds; round++ {
+				for _, hp := range frames {
+					if err := a.sendRaw(hp.dst, hp.frame, syscall.ETH_P_ARP); err != nil {
+						healErr = err
 					}
-					for _, hp := range naFrames {
-						_ = a.sendRaw(hp.dst, hp.frame, syscall.ETH_P_IPV6)
+				}
+				for _, hp := range naFrames {
+					if err := a.sendRaw(hp.dst, hp.frame, syscall.ETH_P_IPV6); err != nil {
+						healErr = err
 					}
+				}
+				if round+1 < healRounds {
 					time.Sleep(healInterval)
 				}
-			}()
+			}
+		} else {
+			healErr = fmt.Errorf("invalid restoration endpoints")
 		}
+	} else {
+		healErr = fmt.Errorf("restoration IP and MAC required")
 	}
 
 	if nftErr != nil {
@@ -372,13 +407,15 @@ func (a *L2ARPAdapter) RemoveQuarantine(ctx context.Context, e *models.Enforceme
 		e.ErrorMessage = nftErr.Error()
 		return nftErr
 	}
+	if healErr != nil {
+		return fmt.Errorf("release healing failed: %w", healErr)
+	}
 
 	now := time.Now().UTC()
 	e.AppliedAt = &now
 	e.ActualState = models.StateRolledBack
 	return nil
 }
-
 
 // forwardingEnabled reports kernel IPv4 forwarding (per networking stack).
 // Poisoned traffic that arrives here is forwarded when on — the cut then
@@ -390,9 +427,9 @@ func forwardingEnabled() bool {
 func forwardingEnabledFrom(path string) bool {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return false
+		return true // Unknown forwarding must not authorize an unprotected cut.
 	}
-	return strings.TrimSpace(string(data)) == "1"
+	return strings.TrimSpace(string(data)) != "0"
 }
 
 func (a *L2ARPAdapter) ApplyRateLimit(ctx context.Context, e *models.Enforcement) error {
@@ -423,7 +460,6 @@ func (a *L2ARPAdapter) Close() {
 // forwarding) or in the ip6 nft drop rules. Only runs when both sides have
 // neighbor-cache IPv6 addresses; v4 enforcement is unaffected otherwise.
 // ---------------------------------------------------------------------------
-
 
 // parseIPv6Neigh extracts neighbor-cache IPv6 addresses per MAC from
 // `ip -6 neigh show` output, skipping FAILED/INCOMPLETE entries.
@@ -484,5 +520,3 @@ func (a *L2ARPAdapter) startNAStorm(stop <-chan struct{}, victimMAC, gwMAC net.H
 		_ = a.sendRaw(dst, f, syscall.ETH_P_IPV6)
 	}, a.hostMAC, victimMAC, gwMAC, victimIPs, gwIPs, poison)
 }
-
-

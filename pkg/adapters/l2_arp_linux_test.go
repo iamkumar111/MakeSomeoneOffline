@@ -129,8 +129,8 @@ func TestForwardingEnabledFrom(t *testing.T) {
 	if forwardingEnabledFrom(off) {
 		t.Fatal("expected false for '0'")
 	}
-	if forwardingEnabledFrom(filepath.Join(dir, "missing")) {
-		t.Fatal("expected false for missing file")
+	if !forwardingEnabledFrom(filepath.Join(dir, "missing")) {
+		t.Fatal("unknown forwarding must require a firewall drop")
 	}
 }
 

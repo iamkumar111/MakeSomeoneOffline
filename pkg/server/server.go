@@ -99,7 +99,7 @@ func NewServer(
 
 // Handler returns the HTTP handler for the server.
 func (s *Server) Handler() http.Handler {
-	return s.router
+	return s.secureHandler(s.router)
 }
 
 func (s *Server) routes() {
@@ -158,7 +158,7 @@ func (s *Server) enableCORS(next http.HandlerFunc) http.HandlerFunc {
 		// with credentials). Same-origin requests (no Origin header) are allowed.
 		if origin == "" {
 			w.Header().Set("Access-Control-Allow-Origin", allow)
-		} else if origin == allow || strings.HasPrefix(origin, "http://localhost:") || strings.HasPrefix(origin, "http://127.0.0.1:") {
+		} else if s.validOrigin(r) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
 		} else {
@@ -240,13 +240,10 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	enforcements := s.policyEngine.ListEnforcements()
 
 	onlineCount := 0
-	quarantinedCount := 0
+	quarantinedCount := len(liveQuarantineIDs(enforcements))
 	for _, d := range devices {
 		if d.IsOnline {
 			onlineCount++
-		}
-		if d.TrustState == models.TrustStateQuarantined {
-			quarantinedCount++
 		}
 	}
 
@@ -277,6 +274,10 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	devices := s.fusionEngine.ListDevices()
+	ids := liveQuarantineIDs(s.policyEngine.ListEnforcements())
+	for i, device := range devices {
+		devices[i] = quarantineView(device, ids)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(devices)
 }
@@ -313,7 +314,14 @@ func (s *Server) handleDeviceDetail(w http.ResponseWriter, r *http.Request) {
 					BreakGlass bool   `json:"break_glass"`
 					Reason     string `json:"reason"`
 				}
-				_ = json.NewDecoder(r.Body).Decode(&req)
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					http.Error(w, "invalid quarantine request JSON", http.StatusBadRequest)
+					return
+				}
+				if req.TTLSec < 0 || req.TTLSec > 30*24*60*60 {
+					http.Error(w, "ttl_seconds must be between 0 and 2592000 (30 days)", http.StatusBadRequest)
+					return
+				}
 				ttl := time.Duration(req.TTLSec) * time.Second
 				if ttl == 0 {
 					ttl = 15 * time.Minute // safe default TTL
@@ -347,25 +355,28 @@ func (s *Server) handleDeviceDetail(w http.ResponseWriter, r *http.Request) {
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}
-				_ = s.fusionEngine.SetTrustState(dev.ID, models.TrustStateQuarantined)
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(enf)
 				return
 			} else if r.Method == http.MethodDelete {
 				enfs := s.policyEngine.ListEnforcements()
 				failures := 0
+				var releaseErrors []string
 				for _, e := range enfs {
 					if e.DeviceID == dev.ID && e.Action == models.ActionQuarantine {
 						if err := s.policyEngine.RemoveQuarantine(r.Context(), e.ID, actor); err != nil {
 							failures++
+							releaseErrors = append(releaseErrors, err.Error())
 						}
 					}
 				}
-				if failures == 0 {
-					_ = s.fusionEngine.SetTrustState(dev.ID, models.TrustStateUnknown)
+				w.Header().Set("Content-Type", "application/json")
+				if failures > 0 {
+					w.WriteHeader(http.StatusInternalServerError)
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "release incomplete", "remove_failures": failures, "errors": releaseErrors})
+					return
 				}
-				w.WriteHeader(http.StatusOK)
-				_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "quarantine removed", "remove_failures": failures})
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "quarantine removed", "remove_failures": 0})
 				return
 			}
 		case "trust":
@@ -396,7 +407,7 @@ func (s *Server) handleDeviceDetail(w http.ResponseWriter, r *http.Request) {
 			}
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
-		case "rename":			// Manual operator rename (rank 5, beats all automatic sources).
+		case "rename": // Manual operator rename (rank 5, beats all automatic sources).
 			if r.Method == http.MethodPost || r.Method == http.MethodPut {
 				var req struct {
 					Name string `json:"name"`
@@ -420,7 +431,8 @@ func (s *Server) handleDeviceDetail(w http.ResponseWriter, r *http.Request) {
 			}
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
-		case "rate-limit":			if r.Method == http.MethodPut || r.Method == http.MethodPost {
+		case "rate-limit":
+			if r.Method == http.MethodPut || r.Method == http.MethodPost {
 				var req struct {
 					Adapter     string `json:"adapter"`
 					DownloadBps uint64 `json:"download_bps"`
@@ -479,6 +491,7 @@ func (s *Server) handleDeviceDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	dev = quarantineView(dev, liveQuarantineIDs(s.policyEngine.ListEnforcements()))
 	// Enriched detail: device + live traffic + enforcements + related alerts.
 	if r.URL.Query().Get("enriched") == "true" {
 		stats, _ := s.telemetryEngine.GetDeviceStats(dev.ID)
@@ -780,15 +793,15 @@ func (s *Server) handleTraffic(w http.ResponseWriter, r *http.Request) {
 	src := s.telemetryEngine.GetTrafficSource()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"top_talkers":        top,
-		"total_rx_bytes":     totalRx,
-		"total_tx_bytes":     totalTx,
-		"total_rx_rate_bps":  totalRxRate,
-		"total_tx_rate_bps":  totalTxRate,
-		"total_rate_bps":     totalRxRate + totalTxRate,
-		"source":             src,
-		"per_ip_available":   hasActivity && src != "unavailable",
-		"gateway_totals":     iface,
+		"top_talkers":       top,
+		"total_rx_bytes":    totalRx,
+		"total_tx_bytes":    totalTx,
+		"total_rx_rate_bps": totalRxRate,
+		"total_tx_rate_bps": totalTxRate,
+		"total_rate_bps":    totalRxRate + totalTxRate,
+		"source":            src,
+		"per_ip_available":  hasActivity && src != "unavailable",
+		"gateway_totals":    iface,
 	})
 }
 
@@ -1050,18 +1063,18 @@ func (s *Server) handleIntegrationDetail(w http.ResponseWriter, r *http.Request)
 	info := a.Describe()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"name":               info.Name,
-		"label":              info.Label,
-		"kind":               info.Kind,
-		"effectiveness_1_5":  info.Effectiveness,
-		"capabilities":       info.Capabilities,
-		"available":          a.IsAvailable(r.Context()),
-		"recommended_when":   info.RecommendedWhen,
-		"requires":           info.Requires,
-		"description":        info.Description,
-		"warning":            info.Warning,
-		"lab_only":           info.LabOnly,
-		"test_only":          info.TestOnly,
+		"name":                info.Name,
+		"label":               info.Label,
+		"kind":                info.Kind,
+		"effectiveness_1_5":   info.Effectiveness,
+		"capabilities":        info.Capabilities,
+		"available":           a.IsAvailable(r.Context()),
+		"recommended_when":    info.RecommendedWhen,
+		"requires":            info.Requires,
+		"description":         info.Description,
+		"warning":             info.Warning,
+		"lab_only":            info.LabOnly,
+		"test_only":           info.TestOnly,
 		"supports_quarantine": info.SupportsQuarantine,
 		"supports_shaping":    info.SupportsShaping,
 	})
@@ -1229,8 +1242,6 @@ func (s *Server) handleExportAuditCSV(w http.ResponseWriter, r *http.Request) {
 			l.ID, l.Timestamp.Format(time.RFC3339), l.Actor, l.Action, l.TargetType, l.TargetID, l.Status, l.Details)
 	}
 }
-
-
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Require same-origin or configured origin; coder/websocket validates Origin

@@ -22,7 +22,7 @@ type Vault struct {
 // NewVault initializes an AES-256-GCM encryption vault from a passphrase or master key.
 func NewVault(passphrase string) (*Vault, error) {
 	if passphrase == "" {
-		passphrase = "open-netcut-default-master-key-change-in-production"
+		return nil, fmt.Errorf("vault requires an explicit secret key; no default encryption key is permitted")
 	}
 
 	// Derive 32-byte key using SHA-256

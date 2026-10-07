@@ -3,6 +3,7 @@ package policy
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -146,6 +147,9 @@ func (pe *PolicyEngine) ApplyQuarantineBreakGlass(ctx context.Context, device *m
 }
 
 func (pe *PolicyEngine) applyQuarantineInner(ctx context.Context, device *models.Device, adapterName string, ttl time.Duration, actor string, dryRun bool, breakGlassReason string) (*models.Enforcement, error) {
+	if runtime.GOOS == "darwin" && !dryRun {
+		return nil, fmt.Errorf("macOS live quarantine is not available; enable Dry Run or use a Linux enforcement host")
+	}
 	if protected, why := pe.IsProtected(device.PrimaryIP, device.PrimaryMAC); protected && breakGlassReason == "" {
 		pe.recordAudit(actor, "quarantine_rejected", "device", device.ID, fmt.Sprintf("Rejected: %s", why), "failed")
 		return nil, fmt.Errorf("safety violation: cannot quarantine protected device: %s", why)
@@ -166,7 +170,7 @@ func (pe *PolicyEngine) applyQuarantineInner(ctx context.Context, device *models
 		// only when explicitly requested — never the silent default.
 		// Order: linux_nftables > linux_tc > mock > l2_arp
 		priority := []string{"linux_nftables", "linux_tc", "mock_simulator", "mock_adapter"}
-	byName := make(map[string]adapters.NetworkAdapter, len(all))
+		byName := make(map[string]adapters.NetworkAdapter, len(all))
 		for _, a := range all {
 			byName[a.Name()] = a
 		}
@@ -279,6 +283,9 @@ func (pe *PolicyEngine) RemoveQuarantine(ctx context.Context, enforcementID, act
 
 // ApplyRateLimit restricts download/upload bandwidth for a target device.
 func (pe *PolicyEngine) ApplyRateLimit(ctx context.Context, device *models.Device, adapterName string, dlBps, ulBps uint64, ttl time.Duration, actor string, dryRun bool) (*models.Enforcement, error) {
+	if runtime.GOOS == "darwin" && !dryRun {
+		return nil, fmt.Errorf("macOS live rate limiting is not available; enable Dry Run or use a Linux enforcement host")
+	}
 	if protected, reason := pe.IsProtected(device.PrimaryIP, device.PrimaryMAC); protected {
 		return nil, fmt.Errorf("safety violation: cannot rate-limit protected infrastructure: %s", reason)
 	}
@@ -388,7 +395,8 @@ func (pe *PolicyEngine) ListPolicies() []*models.Policy {
 }
 
 // DeletePolicy removes a policy rule.
-func (pe *PolicyEngine) DeletePolicy(id string) bool {	pe.mu.Lock()
+func (pe *PolicyEngine) DeletePolicy(id string) bool {
+	pe.mu.Lock()
 	defer pe.mu.Unlock()
 	if _, ok := pe.policies[id]; !ok {
 		return false

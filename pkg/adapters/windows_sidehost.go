@@ -32,9 +32,19 @@ type WindowsSideHostAdapter struct {
 }
 
 type windowsCut struct {
-	stop   chan struct{}
-	done   chan struct{}
-	handle uintptr
+	stop        chan struct{}
+	done        chan struct{}
+	handle      uintptr
+	stopOnce    sync.Once
+	workers     sync.WaitGroup
+	gwIP        net.IP
+	gwMAC       net.HardwareAddr
+	targetIP    net.IP
+	targetMAC   net.HardwareAddr
+	victimIPv6  []net.IP
+	gatewayIPv6 []net.IP
+	send        func([]byte) error
+	closeHandle func()
 }
 
 // NewWindowsSideHostAdapter creates the adapter (no I/O; devices open lazily
@@ -94,39 +104,13 @@ func windowsForwardingEnabled() (bool, error) {
 		}
 		return false, fmt.Errorf("cannot verify IP forwarding state: %v", err)
 	}
-	for _, line := range strings.Split(string(out), "\n") {
-		if strings.Contains(strings.ToLower(line), "ipenablerouter") {
-			if strings.Contains(strings.ToLower(line), "0x1") {
-				return true, nil
-			}
-			return false, nil
-		}
-	}
-	return false, nil
+	return parseIPEnableRouter(string(out))
 }
 
-func windowsHostMAC(ipStr string) (net.HardwareAddr, error) {
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return nil, err
-	}
-	for _, iface := range ifaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-		for _, addr := range addrs {
-			if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.String() == ipStr {
-				if len(iface.HardwareAddr) == 6 {
-					return iface.HardwareAddr, nil
-				}
-			}
-		}
-	}
-	return nil, fmt.Errorf("no interface found with IP %s", ipStr)
+// WindowsForwardingState exposes the same fail-closed check used by quarantine
+// so the helper's readiness report cannot disagree with enforcement.
+func WindowsForwardingState() (bool, error) {
+	return windowsForwardingEnabled()
 }
 
 func (a *WindowsSideHostAdapter) ApplyQuarantine(ctx context.Context, e *models.Enforcement) error {
@@ -167,11 +151,11 @@ func (a *WindowsSideHostAdapter) ApplyQuarantine(ctx context.Context, e *models.
 	if err != nil {
 		return fmt.Errorf("refusing cut: %v (install Npcap)", err)
 	}
-	devName, devIP, err := selectDevice(devices, gwIPStr)
+	locals, err := localIPv4Interfaces()
 	if err != nil {
-		return fmt.Errorf("refusing cut: %v", err)
+		return fmt.Errorf("refusing cut: enumerate local LAN interfaces: %w", err)
 	}
-	hostMAC, err := windowsHostMAC(devIP)
+	devName, _, hostMAC, err := selectLocalDevice(devices, locals, gwIPStr, targetIP.String())
 	if err != nil {
 		return fmt.Errorf("refusing cut: %v", err)
 	}
@@ -182,18 +166,32 @@ func (a *WindowsSideHostAdapter) ApplyQuarantine(ctx context.Context, e *models.
 
 	a.mu.Lock()
 	if old, ok := a.active[targetIP.String()]; ok {
-		close(old.stop)
+		old.stopOnce.Do(func() { close(old.stop) })
 		<-old.done
-		npcapClose(old.handle)
+		old.closeHandle()
 		delete(a.active, targetIP.String())
 	}
 	stop := make(chan struct{})
 	done := make(chan struct{})
-	a.active[targetIP.String()] = &windowsCut{stop: stop, done: done, handle: handle}
+	cut := &windowsCut{stop: stop, done: done, handle: handle,
+		gwIP: gwIP, gwMAC: gwMAC, targetIP: targetIP, targetMAC: targetMAC,
+		send:        func(frame []byte) error { return npcapSend(handle, frame) },
+		closeHandle: func() { npcapClose(handle) },
+	}
+	// Save the genuine endpoints before poisoning, including any IPv6 pairing.
+	cut.victimIPv6 = windowsNDPAddrs(ctx, targetMAC)
+	if len(cut.victimIPv6) > 0 {
+		cut.gatewayIPv6 = windowsNDPAddrs(ctx, gwMAC)
+	}
+	cut.workers.Add(1)
+	if len(cut.victimIPv6) > 0 && len(cut.gatewayIPv6) > 0 {
+		cut.workers.Add(1)
+	}
+	a.active[targetIP.String()] = cut
 	a.mu.Unlock()
 
 	go func() {
-		defer close(done)
+		defer cut.workers.Done()
 		ticker := time.NewTicker(350 * time.Millisecond)
 		defer ticker.Stop()
 		send := func() {
@@ -231,13 +229,15 @@ func (a *WindowsSideHostAdapter) ApplyQuarantine(ctx context.Context, e *models.
 	// Pair the v4 cut with NDP spoofing when both sides have IPv6 neighbor
 	// addresses; otherwise dual-stack victims stay online over v6.
 	// Best effort: v4 enforcement stands regardless.
-	if victimIPs := windowsNDPAddrs(ctx, targetMAC); len(victimIPs) > 0 {
-		if gwIPs := windowsNDPAddrs(ctx, gwMAC); len(gwIPs) > 0 {
-			go runNAStorm(stop, func(_ net.HardwareAddr, f []byte) {
-				_ = npcapSend(handle, f)
-			}, hostMAC, targetMAC, gwMAC, victimIPs, gwIPs, true)
-		}
+	if len(cut.victimIPv6) > 0 && len(cut.gatewayIPv6) > 0 {
+		go func() {
+			defer cut.workers.Done()
+			runNAStorm(stop, func(_ net.HardwareAddr, f []byte) {
+				_ = cut.send(f)
+			}, hostMAC, targetMAC, gwMAC, cut.victimIPv6, cut.gatewayIPv6, true)
+		}()
 	}
+	go func() { cut.workers.Wait(); close(done) }()
 
 	now := time.Now().UTC()
 	e.AppliedAt = &now
@@ -246,66 +246,50 @@ func (a *WindowsSideHostAdapter) ApplyQuarantine(ctx context.Context, e *models.
 }
 
 func (a *WindowsSideHostAdapter) RemoveQuarantine(_ context.Context, e *models.Enforcement) error {
-	a.mu.Lock()
-	cut, ok := a.active[strings.TrimSpace(e.TargetIP)]
-	if ok {
-		delete(a.active, strings.TrimSpace(e.TargetIP))
+	if e.DryRun {
+		e.ActualState = models.StateRolledBack
+		return nil
 	}
-	a.mu.Unlock()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	cut, ok := a.active[strings.TrimSpace(e.TargetIP)]
 	if !ok {
 		now := time.Now().UTC()
 		e.AppliedAt = &now
 		e.ActualState = models.StateRolledBack
 		return nil
 	}
-	close(cut.stop)
+	cut.stopOnce.Do(func() { close(cut.stop) })
 	<-cut.done
-
-	// Heal with genuine-MAC frames before closing the handle.
-	if gwIP, gwMAC, targetIP, targetMAC, ok := parseHealAddrs(e); ok {
-		for _, hp := range healingFrames(gwIP, gwMAC, targetIP, targetMAC) {
-			_ = npcapSend(cut.handle, hp.frame)
-		}
-		time.Sleep(healInterval)
-		for _, hp := range healingFrames(gwIP, gwMAC, targetIP, targetMAC) {
-			_ = npcapSend(cut.handle, hp.frame)
-		}
-		// Restore v6 caches too when neighbor addresses are known.
-		if victimIPs := windowsNDPAddrs(context.Background(), targetMAC); len(victimIPs) > 0 {
-			if gwIPs := windowsNDPAddrs(context.Background(), gwMAC); len(gwIPs) > 0 {
-				for _, hp := range healingNAFrames(gwIPs, gwMAC, victimIPs, targetMAC) {
-					_ = npcapSend(cut.handle, hp.frame)
-				}
+	// Wait for BOTH poison loops, then restore the saved genuine mappings.
+	// A fresh gateway lookup during release could use a changed route/cache.
+	frames := healingFrames(cut.gwIP, cut.gwMAC, cut.targetIP, cut.targetMAC)
+	if len(frames) == 0 {
+		return fmt.Errorf("release failed: genuine ARP endpoints unavailable")
+	}
+	frames = append(frames, healingNAFrames(cut.gatewayIPv6, cut.gwMAC, cut.victimIPv6, cut.targetMAC)...)
+	var sendErr error
+	for round := 0; round < healRounds; round++ {
+		for _, hp := range frames {
+			if err := cut.send(hp.frame); err != nil {
+				sendErr = err
 			}
 		}
+		if round+1 < healRounds {
+			time.Sleep(healInterval)
+		}
 	}
-	npcapClose(cut.handle)
+	if sendErr != nil {
+		// Retain the stopped session and open handle so restoration can retry.
+		return fmt.Errorf("release failed while sending healing frames: %w", sendErr)
+	}
+	cut.closeHandle()
+	delete(a.active, strings.TrimSpace(e.TargetIP))
 
 	now := time.Now().UTC()
 	e.AppliedAt = &now
 	e.ActualState = models.StateRolledBack
 	return nil
-}
-
-func parseHealAddrs(e *models.Enforcement) (gwIP net.IP, gwMAC net.HardwareAddr, targetIP net.IP, targetMAC net.HardwareAddr, ok bool) {
-	targetIP = net.ParseIP(strings.TrimSpace(e.TargetIP))
-	var err error
-	targetMAC, err = net.ParseMAC(strings.TrimSpace(e.TargetMAC))
-	if targetIP == nil || err != nil {
-		return nil, nil, nil, nil, false
-	}
-	// Gateway may have changed; resolve fresh. If unresolvable, skip healing
-	// rather than sending wrong frames.
-	gwIPStr, gwMACStr, err := discovery.GetDefaultGateway(context.Background())
-	if err != nil {
-		return nil, nil, nil, nil, false
-	}
-	gwIP = net.ParseIP(gwIPStr)
-	gwMAC, err = net.ParseMAC(gwMACStr)
-	if gwIP == nil || err != nil {
-		return nil, nil, nil, nil, false
-	}
-	return gwIP, gwMAC, targetIP, targetMAC, true
 }
 
 func (a *WindowsSideHostAdapter) ApplyRateLimit(_ context.Context, _ *models.Enforcement) error {

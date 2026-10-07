@@ -21,6 +21,7 @@ import {
   Video
 } from 'lucide-react';
 import { Device, Alert, Stats, DeviceTrafficStats } from './types';
+import { liveQuarantines, quarantineDevices } from './quarantine';
 
 // Two-click inline confirm: first click arms (red, 5s), second executes.
 // Replaces blocking native confirm() dialogs.
@@ -43,7 +44,7 @@ function ConfirmButton({ title, className, style, children, confirmLabel, onConf
 export default function App() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'devices' | 'traffic' | 'alerts' | 'audit' | 'policies' | 'quarantine' | 'cameras'>('dashboard');
   const [stats, setStats] = useState<Stats | null>(null);
-  const [devices, setDevices] = useState<Device[]>([]);
+  const [inventoryDevices, setDevices] = useState<Device[]>([]);
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [trafficStats, setTrafficStats] = useState<DeviceTrafficStats[]>([]);
   const [trafficTotals, setTrafficTotals] = useState<{total_rate_bps:number;total_rx_rate_bps:number;total_tx_rate_bps:number}|null>(null);
@@ -53,6 +54,9 @@ export default function App() {
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
   const [policies, setPolicies] = useState<any[]>([]);
   const [enforcements, setEnforcements] = useState<any[]>([]);
+  const liveCuts = useMemo(() => liveQuarantines(enforcements), [enforcements]);
+  const cutDeviceCount = useMemo(() => new Set(liveCuts.map(e => e.device_id)).size, [liveCuts]);
+  const devices = useMemo(() => quarantineDevices(inventoryDevices, liveCuts), [inventoryDevices, liveCuts]);
   // Ranked adapter guidance from GET /integrations?action=...
   type RankedAdapter = { info: { name: string; label: string; kind: string; effectiveness_1_5: number; capabilities: string[]; recommended_when: string; requires: string; description: string; warning?: string; lab_only?: boolean; test_only?: boolean; supports_quarantine: boolean; supports_shaping: boolean }; available: boolean; supports_action: boolean; recommended: boolean; reason: string };
   const [rankedQuarantine, setRankedQuarantine] = useState<RankedAdapter[]>([]);
@@ -342,8 +346,8 @@ export default function App() {
 
   // Active quarantine enforcement (if any) for a device, for inline timers.
   const enforcementFor = (deviceId: string): any | null => {
-    for (const e of enforcements) {
-      if (e.device_id === deviceId && e.action === 'quarantine' && e.actual_state === 'applied') return e;
+    for (const e of liveCuts) {
+      if (e.device_id === deviceId) return e;
     }
     return null;
   };
@@ -686,6 +690,7 @@ export default function App() {
         setTimeout(() => setActionMessage(null), 4000);
       }
       setShowQuarantineModal(false);
+      fetchPolicies();
       refreshData();
     } catch (err) {
       notifyError(`Request failed: ${err}`);
@@ -698,8 +703,11 @@ export default function App() {
   const waitForRelease = async (deviceId: string | null, timeoutMs = 30000) => {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
-      const enfs: any[] = await fetch('/api/v1/enforcements').then(r => r.json()).catch(() => []);
-      const live = enfs.filter(e => !e.dry_run && e.actual_state === 'applied' && (!deviceId || e.device_id === deviceId));
+      const response = await fetch('/api/v1/enforcements');
+      if (!response.ok) throw new Error(`Cannot verify release: HTTP ${response.status}`);
+      const enfs: any[] = await response.json();
+      if (!Array.isArray(enfs)) throw new Error('Cannot verify release: invalid enforcement response');
+      const live = liveQuarantines(enfs).filter(e => !deviceId || e.device_id === deviceId);
       fetchPolicies(); refreshData(); fetchFreezeStatus();
       if (live.length === 0) return { ok: true as const, remaining: [] as any[] };
       if (Date.now() > deadline) return { ok: false as const, remaining: live };
@@ -713,7 +721,7 @@ export default function App() {
         method: 'DELETE'
       });
       if (!res.ok) {
-        notifyError(`Lift failed: ${res.statusText}`);
+        notifyError(`Lift failed: ${await res.text()}`);
         return;
       }
       setActionMessage(`Releasing ${device.display_name}…`);
@@ -969,16 +977,16 @@ export default function App() {
                 <Lock size={24} />
               </div>
               <div>
-                <div className="stat-val">{stats?.quarantined_devices ?? 0}</div>
+                <div className="stat-val">{cutDeviceCount}</div>
                 <div className="stat-label">Quarantined / Cut</div>
                 {(() => {
-                  const live = enforcements.filter((e: any) => !e.dry_run && e.actual_state === 'applied').length;
+                  const live = liveCuts.length;
                   return <div className="font-mono" style={{ fontSize: '0.75rem', color: live > 0 ? '#f87171' : '#9ca3af' }}>{live} live cut{live === 1 ? '' : 's'}</div>;
                 })()}
                 {(() => {
                   let minMs = Infinity;
-                  for (const e of enforcements) {
-                    if (e.action !== 'quarantine' || e.actual_state !== 'applied' || !e.expires_at) continue;
+                  for (const e of liveCuts) {
+                    if (!e.expires_at) continue;
                     const ms = new Date(e.expires_at).getTime() - nowTs;
                     if (ms > 0 && ms < minMs) minMs = ms;
                   }

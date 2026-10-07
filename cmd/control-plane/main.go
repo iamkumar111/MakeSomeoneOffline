@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -94,10 +95,14 @@ func reconcileQuarantineChains(nft *adapters.LinuxNFTablesAdapter) {
 
 func main() {
 	port := flag.String("port", "8080", "Port to listen on")
+	listenHost := flag.String("listen", "127.0.0.1", "Listen address; non-loopback access requires NETCUT_API_TOKEN and HTTPS via a proxy")
 	siteID := flag.String("site", "default", "Site identifier")
 	enableScanner := flag.Bool("scanner", true, "Enable local ARP/procfs network scanner")
 	dbPath := flag.String("db", "", "Path to persistent database storage (optional)")
 	flag.Parse()
+	if ip := net.ParseIP(*listenHost); (*listenHost != "localhost" && (ip == nil || !ip.IsLoopback())) && os.Getenv("NETCUT_API_TOKEN") == "" {
+		log.Fatal("Non-loopback listening requires NETCUT_API_TOKEN; use the default 127.0.0.1 for local access")
+	}
 
 	envPort := os.Getenv("PORT")
 	if envPort != "" {
@@ -336,7 +341,9 @@ func main() {
 						}
 					}
 					if !stillCovered {
-						_ = fusionEngine.SetTrustState(enf.DeviceID, models.TrustStateUnknown)
+						if dev, ok := fusionEngine.GetDevice(enf.DeviceID); ok && dev.TrustState == models.TrustStateQuarantined {
+							_ = fusionEngine.SetTrustState(enf.DeviceID, models.TrustStateUnknown)
+						}
 					}
 				}
 			}
@@ -355,7 +362,7 @@ func main() {
 		server.WithFreezeController(freezeCtrl),
 	)
 	httpServer := &http.Server{
-		Addr:         ":" + *port,
+		Addr:         net.JoinHostPort(*listenHost, *port),
 		Handler:      srv.Handler(),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,

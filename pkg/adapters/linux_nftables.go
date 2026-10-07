@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -50,10 +52,10 @@ func (a *LinuxNFTablesAdapter) Describe() AdapterInfo {
 	return AdapterInfo{
 		Name: "linux_nftables", Label: "Linux Gateway — nftables (Recommended for quarantine)",
 		Kind: KindQuarantine, Effectiveness: 5,
-		Capabilities: a.Capabilities(),
-		RecommendedWhen: "Linux gateway deployment: kernel-level drop of device IP+MAC in forward/input chains.",
-		Requires: "nft binary + root/CAP_NET_ADMIN on the gateway.",
-		Description: "Surgical per-device drop rules with per-enforcement rollback. Most effective quarantine on this box.",
+		Capabilities:       a.Capabilities(),
+		RecommendedWhen:    "Linux gateway deployment: kernel-level drop of device IP+MAC in forward/input chains.",
+		Requires:           "nft binary + root/CAP_NET_ADMIN on the gateway.",
+		Description:        "Surgical per-device drop rules with per-enforcement rollback. Most effective quarantine on this box.",
 		SupportsQuarantine: true, SupportsShaping: false,
 	}
 }
@@ -82,6 +84,9 @@ func (a *LinuxNFTablesAdapter) EnsureTable(ctx context.Context) error {
 }
 
 func (a *LinuxNFTablesAdapter) ensureTableLocked(ctx context.Context) error {
+	if !nftIdentifier.MatchString(a.tableName) || !nftIdentifier.MatchString(a.chainName) {
+		return fmt.Errorf("invalid nft table or chain name")
+	}
 	if !a.isAvailableLocked() {
 		return fmt.Errorf("nft executable not found in PATH")
 	}
@@ -90,14 +95,14 @@ func (a *LinuxNFTablesAdapter) ensureTableLocked(ctx context.Context) error {
 	// nft add table inet open_netcut
 	// nft add chain inet open_netcut forward '{ type filter hook forward priority -10; policy accept; }'
 	// nft add chain inet open_netcut input '{ type filter hook input priority -10; policy accept; }'
-	commands := []string{
-		fmt.Sprintf("nft add table inet %s", a.tableName),
-		fmt.Sprintf("nft 'add chain inet %s forward { type filter hook forward priority -10; policy accept; }'", a.tableName),
-		fmt.Sprintf("nft 'add chain inet %s input { type filter hook input priority -10; policy accept; }'", a.tableName),
+	commands := [][]string{
+		{"add", "table", "inet", a.tableName},
+		{"add", "chain", "inet", a.tableName, "forward", "{ type filter hook forward priority -10; policy accept; }"},
+		{"add", "chain", "inet", a.tableName, "input", "{ type filter hook input priority -10; policy accept; }"},
 	}
 
 	for _, cmdStr := range commands {
-		cmd := exec.CommandContext(ctx, "sh", "-c", cmdStr)
+		cmd := exec.CommandContext(ctx, "nft", cmdStr...)
 		_ = cmd.Run() // ignore if already exists
 	}
 
@@ -107,6 +112,9 @@ func (a *LinuxNFTablesAdapter) ensureTableLocked(ctx context.Context) error {
 func (a *LinuxNFTablesAdapter) ApplyQuarantine(ctx context.Context, e *models.Enforcement) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if err := validateNFTTarget(a.tableName, e); err != nil {
+		return err
+	}
 
 	if e.DryRun {
 		now := time.Now().UTC()
@@ -119,7 +127,9 @@ func (a *LinuxNFTablesAdapter) ApplyQuarantine(ctx context.Context, e *models.En
 		return fmt.Errorf("nft command not available on this host")
 	}
 
-	_ = a.ensureTableLocked(ctx)
+	if err := a.ensureTableLocked(ctx); err != nil {
+		return err
+	}
 
 	// Add drop rules for target IP and MAC in both forward and input chains.
 	// Rule specs are stored per-enforcement so removal deletes only these rules.
@@ -128,6 +138,7 @@ func (a *LinuxNFTablesAdapter) ApplyQuarantine(ctx context.Context, e *models.En
 		return fmt.Errorf("no target IP or MAC specified for quarantine")
 	}
 
+	var batch []string
 	for _, spec := range ruleSpecs {
 		// Dedupe: an identical rule from an earlier enforcement (or a
 		// previous run) must not pile up — duplicates survive single
@@ -135,7 +146,13 @@ func (a *LinuxNFTablesAdapter) ApplyQuarantine(ctx context.Context, e *models.En
 		if a.ruleExistsLocked(ctx, spec) {
 			continue
 		}
-		cmd := exec.CommandContext(ctx, "sh", "-c", "nft add rule "+spec)
+		batch = append(batch, "add rule "+spec)
+	}
+	if len(batch) > 0 {
+		// nft applies a file as a transaction: a failed rule must not leave an
+		// untracked partial quarantine. Targets and identifiers were validated.
+		cmd := exec.CommandContext(ctx, "nft", "-f", "-")
+		cmd.Stdin = strings.NewReader(strings.Join(batch, "\n") + "\n")
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			e.ActualState = models.StateFailed
@@ -154,6 +171,9 @@ func (a *LinuxNFTablesAdapter) ApplyQuarantine(ctx context.Context, e *models.En
 func (a *LinuxNFTablesAdapter) RemoveQuarantine(ctx context.Context, e *models.Enforcement) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if err := validateNFTTarget(a.tableName, e); err != nil {
+		return err
+	}
 
 	if e.DryRun {
 		now := time.Now().UTC()
@@ -200,6 +220,41 @@ func (a *LinuxNFTablesAdapter) RemoveQuarantine(ctx context.Context, e *models.E
 }
 
 // quarantineSpecs builds the drop-rule specs for an enforcement.
+var nftIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+func validateNFTTarget(table string, e *models.Enforcement) error {
+	if !nftIdentifier.MatchString(table) {
+		return fmt.Errorf("invalid nft table name")
+	}
+	if e.TargetIP == "" && e.TargetMAC == "" {
+		return fmt.Errorf("quarantine target IP or MAC required")
+	}
+	if e.TargetIP != "" && net.ParseIP(e.TargetIP) == nil {
+		return fmt.Errorf("invalid target IP %q", e.TargetIP)
+	}
+	if e.TargetMAC != "" {
+		mac, err := net.ParseMAC(e.TargetMAC)
+		if err != nil || len(mac) != 6 {
+			return fmt.Errorf("invalid Ethernet target MAC %q", e.TargetMAC)
+		}
+	}
+	return nil
+}
+
+func nftTokenMatch(line, target string) bool {
+	for _, field := range strings.Fields(line) {
+		if strings.EqualFold(field, target) {
+			return true
+		}
+	}
+	return false
+}
+
+func isNFTHandle(value string) bool {
+	_, err := strconv.ParseUint(value, 10, 64)
+	return value != "" && err == nil
+}
+
 // IPv6 targets get ip6 matches so dual-stack victims can't bypass over v6.
 func quarantineSpecs(table string, e *models.Enforcement) []string {
 	var specs []string
@@ -238,7 +293,7 @@ func (a *LinuxNFTablesAdapter) ruleExistsLocked(ctx context.Context, spec string
 	if chain == "" {
 		return false
 	}
-	out, err := exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf("nft list chain inet %s %s", a.tableName, chain)).CombinedOutput()
+	out, err := exec.CommandContext(ctx, "nft", "list", "chain", "inet", a.tableName, chain).CombinedOutput()
 	if err != nil {
 		return false
 	}
@@ -253,7 +308,7 @@ func (a *LinuxNFTablesAdapter) ruleExistsLocked(ctx context.Context, spec string
 // deleteRuleAllLocked deletes every instance of a spec (bounded loop).
 func (a *LinuxNFTablesAdapter) deleteRuleAllLocked(ctx context.Context, spec string) {
 	for i := 0; i < 32; i++ {
-		cmd := exec.CommandContext(ctx, "sh", "-c", "nft delete rule "+spec)
+		cmd := exec.CommandContext(ctx, "nft", append([]string{"delete", "rule"}, strings.Fields(spec)...)...)
 		if err := cmd.Run(); err != nil {
 			return // no more instances (or chain gone)
 		}
@@ -270,8 +325,7 @@ func (a *LinuxNFTablesAdapter) deleteRuleAllLocked(ctx context.Context, spec str
 func (a *LinuxNFTablesAdapter) deleteRuleHandlesLocked(ctx context.Context, e *models.Enforcement) {
 	for _, chain := range []string{"forward", "input"} {
 		for _, h := range a.matchingHandlesLocked(ctx, chain, e) {
-			cmd := exec.CommandContext(ctx, "sh", "-c",
-				fmt.Sprintf("nft delete rule inet %s %s handle %s", a.tableName, chain, h))
+			cmd := exec.CommandContext(ctx, "nft", "delete", "rule", "inet", a.tableName, chain, "handle", h)
 			_ = cmd.Run()
 		}
 	}
@@ -279,8 +333,7 @@ func (a *LinuxNFTablesAdapter) deleteRuleHandlesLocked(ctx context.Context, e *m
 
 // matchingHandlesLocked returns kernel handles of drop rules referencing the target.
 func (a *LinuxNFTablesAdapter) matchingHandlesLocked(ctx context.Context, chain string, e *models.Enforcement) []string {
-	out, err := exec.CommandContext(ctx, "sh", "-c",
-		fmt.Sprintf("nft --handle list chain inet %s %s", a.tableName, chain)).CombinedOutput()
+	out, err := exec.CommandContext(ctx, "nft", "--handle", "list", "chain", "inet", a.tableName, chain).CombinedOutput()
 	if err != nil {
 		return nil
 	}
@@ -294,17 +347,17 @@ func (a *LinuxNFTablesAdapter) matchingHandlesLocked(ctx context.Context, chain 
 			continue
 		}
 		matched := false
-		if e.TargetIP != "" && strings.Contains(t, e.TargetIP) {
+		if e.TargetIP != "" && nftTokenMatch(t, e.TargetIP) {
 			matched = true
 		}
-		if e.TargetMAC != "" && strings.Contains(strings.ToLower(t), strings.ToLower(e.TargetMAC)) {
+		if e.TargetMAC != "" && nftTokenMatch(t, e.TargetMAC) {
 			matched = true
 		}
 		if !matched {
 			continue
 		}
 		if i := strings.LastIndex(t, "# handle"); i >= 0 {
-			if h := strings.TrimSpace(t[i+len("# handle"):]); h != "" {
+			if h := strings.TrimSpace(t[i+len("# handle"):]); isNFTHandle(h) {
 				handles = append(handles, h)
 			}
 		}
@@ -315,19 +368,19 @@ func (a *LinuxNFTablesAdapter) matchingHandlesLocked(ctx context.Context, chain 
 // remnantRuleLocked returns a leftover rule line referencing the target, if any.
 func (a *LinuxNFTablesAdapter) remnantRuleLocked(ctx context.Context, e *models.Enforcement) string {
 	for _, chain := range []string{"forward", "input"} {
-		out, err := exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf("nft list chain inet %s %s", a.tableName, chain)).CombinedOutput()
+		out, err := exec.CommandContext(ctx, "nft", "list", "chain", "inet", a.tableName, chain).CombinedOutput()
 		if err != nil {
-			continue
+			return "cannot verify chain " + chain + ": " + strings.TrimSpace(string(out))
 		}
 		for _, line := range strings.Split(string(out), "\n") {
 			t := strings.TrimSpace(line)
 			if t == "" || strings.HasPrefix(t, "table ") || strings.HasPrefix(t, "chain ") || t == "}" {
 				continue
 			}
-			if e.TargetIP != "" && strings.Contains(t, e.TargetIP) {
+			if e.TargetIP != "" && nftTokenMatch(t, e.TargetIP) {
 				return chain + ": " + t
 			}
-			if e.TargetMAC != "" && strings.Contains(strings.ToLower(t), strings.ToLower(e.TargetMAC)) {
+			if e.TargetMAC != "" && nftTokenMatch(t, e.TargetMAC) {
 				return chain + ": " + t
 			}
 		}
@@ -351,9 +404,11 @@ func (a *LinuxNFTablesAdapter) FlushQuarantineChains(ctx context.Context) error 
 	if !a.isAvailableLocked() {
 		return fmt.Errorf("nft command not available on this host")
 	}
-	_ = a.ensureTableLocked(ctx)
+	if err := a.ensureTableLocked(ctx); err != nil {
+		return err
+	}
 	for _, chain := range []string{"forward", "input"} {
-		cmd := exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf("nft flush chain inet %s %s", a.tableName, chain))
+		cmd := exec.CommandContext(ctx, "nft", "flush", "chain", "inet", a.tableName, chain)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("flush %s: %s: %w", chain, strings.TrimSpace(string(out)), err)
 		}

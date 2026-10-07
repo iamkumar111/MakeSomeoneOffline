@@ -50,15 +50,15 @@ func (s *Server) handleCameras(w http.ResponseWriter, r *http.Request) {
 		}
 		_, rtsp := dev.Metadata["rtsp_open"]
 		out = append(out, map[string]interface{}{
-			"id":          dev.ID,
+			"id":           dev.ID,
 			"display_name": dev.DisplayName,
-			"primary_ip":  dev.PrimaryIP,
-			"primary_mac": dev.PrimaryMAC,
-			"vendor":      dev.Vendor,
-			"is_online":   dev.IsOnline,
-			"rtsp_open":   rtsp,
-			"banner":      dev.Metadata["http_banner"],
-			"web_url":     fmt.Sprintf("http://%s/", dev.PrimaryIP),
+			"primary_ip":   dev.PrimaryIP,
+			"primary_mac":  dev.PrimaryMAC,
+			"vendor":       dev.Vendor,
+			"is_online":    dev.IsOnline,
+			"rtsp_open":    rtsp,
+			"banner":       dev.Metadata["http_banner"],
+			"web_url":      fmt.Sprintf("http://%s/", dev.PrimaryIP),
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -135,11 +135,15 @@ func (s *Server) probeCameraSnapshot(w http.ResponseWriter, r *http.Request, dev
 // HTTP 200 image bodies that pass magic-byte sniffing, so login pages and
 // empty responses never count. baseURL carries scheme+host(+port) for tests.
 func trySnapshotURL(client *http.Client, ctx context.Context, rawURL string) (contentType string, n int, ok bool) {
+	// Copy rather than mutate the caller's client. Never follow a camera redirect
+	// to another host (including local services or a metadata endpoint).
+	guarded := *client
+	guarded.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return "", 0, false
 	}
-	resp, err := client.Do(req)
+	resp, err := guarded.Do(req)
 	if err != nil {
 		return "", 0, false
 	}
@@ -203,7 +207,7 @@ func (s *Server) proxyCameraImage(w http.ResponseWriter, r *http.Request, dev *m
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	client := &http.Client{Timeout: 0} // streams (MJPEG) run until client disconnects
+	client := &http.Client{Timeout: 0, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }} // streams run until disconnect
 	if q.Get("src") == "" {
 		client.Timeout = 8 * time.Second // single snapshots must be quick
 	}
@@ -218,8 +222,9 @@ func (s *Server) proxyCameraImage(w http.ResponseWriter, r *http.Request, dev *m
 		return
 	}
 	ct := resp.Header.Get("Content-Type")
-	if ct == "" {
-		ct = "application/octet-stream"
+	if !strings.HasPrefix(strings.ToLower(ct), "image/") && !strings.HasPrefix(strings.ToLower(ct), "multipart/x-mixed-replace") {
+		http.Error(w, "camera response is not an image or MJPEG stream", http.StatusBadGateway)
+		return
 	}
 	w.Header().Set("Content-Type", ct)
 	w.Header().Set("Cache-Control", "no-store")

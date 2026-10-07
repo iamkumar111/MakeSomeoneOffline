@@ -18,6 +18,20 @@ func fakeJPEG() []byte {
 	return body
 }
 
+func TestSnapshotRedirectCannotReachAnotherHost(t *testing.T) {
+	visits := 0
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { visits++; w.Write(fakeJPEG()) }))
+	defer other.Close()
+	camera := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, other.URL, http.StatusFound) }))
+	defer camera.Close()
+	if _, _, ok := trySnapshotURL(camera.Client(), t.Context(), camera.URL); ok {
+		t.Fatal("redirect accepted as snapshot")
+	}
+	if visits != 0 {
+		t.Fatal("camera redirect reached another service")
+	}
+}
+
 func TestTrySnapshotURLFindsImage(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/snapshot.jpg" {

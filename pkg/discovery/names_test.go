@@ -13,6 +13,14 @@ import (
 	"github.com/open-netcut/open-netcut/pkg/models"
 )
 
+func TestDHCPParserRejectsWrongUDPPortPair(t *testing.T) {
+	frame := buildDHCPCapture(t, net.HardwareAddr{2, 0, 0, 0, 0, 24}, "test-device", "192.168.1.24", "192.168.1.1")
+	binary.BigEndian.PutUint16(frame[34:36], 12345)
+	if _, _, _, _, ok := parseDHCPPacket(frame); ok {
+		t.Fatal("non-DHCP source port accepted")
+	}
+}
+
 // buildDHCPCapture crafts Ethernet/IPv4/UDP/BOOTP bytes for a DHCP REQUEST.
 func buildDHCPCapture(t *testing.T, chaddr net.HardwareAddr, hostname, reqIP, serverIP string) []byte {
 	t.Helper()

@@ -8,11 +8,11 @@
 ---
 
 > [!IMPORTANT]
-> **Linux Only**: Open-NetCut is designed and built exclusively for the **Linux** operating system. It relies directly on Linux kernel subsystems (`AF_PACKET` raw sockets, `nftables` netfilter rules, `tc` traffic shaping, and `/sys/class/net` interface introspection). It does **not** run natively on Windows or macOS.
+> **Platform support**: Linux gateway deployments provide kernel enforcement and traffic shaping. Native Windows builds provide dashboard/discovery, dry-runs, and experimental Npcap side-host quarantine. Follow the [Windows setup guide](WINDOWS_SETUP_AND_TEST_GUIDE.md), including Application Control / Intune requirements. The initial [macOS version](MACOS_SETUP_AND_TEST_GUIDE.md) supports discovery and dry-run previews; live macOS enforcement is unavailable.
 
 ---
 
-## 🐧 Linux Only — Supported Distributions & Flavors
+## Linux gateway: supported distributions and prerequisites
 
 Open-NetCut runs on any modern Linux system (Kernel 5.4+) with `root` or `CAP_NET_ADMIN` + `CAP_NET_RAW` privileges:
 
@@ -29,7 +29,7 @@ Open-NetCut runs on any modern Linux system (Kernel 5.4+) with `root` or `CAP_NE
 | **Raspberry Pi OS** | Bullseye, Bookworm (32/64-bit) | `sudo apt update && sudo apt install -y nftables iproute2` |
 
 > [!NOTE]
-> **Using Windows or macOS**: Since Open-NetCut directly manipulates Linux raw sockets and netfilter tables, Windows and macOS are not natively supported. To use Open-NetCut from a Windows or Mac host, run a Linux VM (VirtualBox, VMware, or KVM) configured with a **Bridged Network Adapter** connected directly to your physical Ethernet/Wi-Fi interface. (Default WSL2 or Docker Desktop NAT bridges isolate L2 Ethernet frames).
+> **Windows or macOS with Linux enforcement**: Use a Linux gateway or a Linux VM with a **Bridged Network Adapter** connected to the physical LAN. Default WSL2 or Docker Desktop NAT does not expose the required LAN layer-2 path. For native Windows side-host operation, use the [Windows guide](WINDOWS_SETUP_AND_TEST_GUIDE.md).
 
 ---
 
@@ -39,6 +39,7 @@ Open-NetCut runs on any modern Linux system (Kernel 5.4+) with `root` or `CAP_NE
 |---|---|---|
 | Control plane **runs on the gateway** (native, root) | `linux_nftables` + `linux_tc` (★ recommended, auto-selected) | Yes |
 | Side host, unmanaged ISP router | `l2_arp` — ARP enforcement, explicit opt-in (`ENABLE_L2_ARP=1`), own networks only, disruptive by design | Yes |
+| Native Windows side host | `windows_sidehost` via Npcap; explicit selection, Administrator, forwarding OFF | Same LAN; validate on target |
 
 `mock_simulator` is lab-only and touches no real packets. The UI ranks every
 adapter live (`/api/v1/integrations?action=quarantine`) and pre-selects the
